@@ -1,0 +1,230 @@
+# 双仓部署：内容仓推送 → 本仓库构建 → 产物推 deploy 分支 → 通知服务器拉取。
+# 基于 deploy.yml.example 适配：
+#   - CONTENT_REPOSITORY 指向 Nyaecho/blog-content；
+#   - Deploy 步骤替换为「dist 以 orphan commit 强推 deploy 分支 + webhook 通知 + 轮询部署回执」；
+#   - 服务器端由 shirone-admin 的 /api/deploy/hook 接收（HMAC 签名验证），
+#     在 /www/wwwroot/blog 执行稀疏拉取（sparse-checkout dist），nginx root 指向 dist/。
+#
+# 所需 Secrets（Settings → Secrets and variables → Actions）：
+#   - CONTENT_REPO_TOKEN ：对 Nyaecho/blog-content 只读（Contents: read）的 PAT
+#   - DEPLOY_TOKEN      ：对 Nyaecho/Shirone 可写（Contents: read and write）的 PAT，用于推 deploy 分支
+#   - DEPLOY_HOOK_URL    ：https://admin.<你的域名>/api/deploy/hook
+#   - DEPLOY_HOOK_SECRET ：与服务器 admin .env 中 DEPLOY_SECRET 相同的随机串
+
+name: Deploy
+
+on:
+  # 代码变更。
+  push:
+    branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "rules/**"
+      - "README*.md"
+      - "*.md"
+  # 内容仓推送后由 trigger-build.yml 发来的事件。
+  repository_dispatch:
+    types: [content-updated]
+  # 手动触发；回滚时把 content_ref 填成旧的内容 SHA。
+  workflow_dispatch:
+    inputs:
+      content_ref:
+        description: "内容仓 ref 或 commit SHA（留空使用 main）"
+        required: false
+        default: ""
+  # 兜底：repository_dispatch 事件偶尔会丢，每天重建一次保证最终一致。
+  schedule:
+    - cron: "17 4 * * *"
+
+# 并发控制：同一时间只允许一个部署流水线运行。
+# 无论是代码仓代码推送（push）还是内容仓触发（repository_dispatch），
+# 均归入同一个 deploy 并发通道。新的构建请求会自动取消正在运行中的旧构建，
+# 确保始终以最新一次提交（最新代码 + 最新内容）为准，杜绝并发竞争。
+concurrency:
+  group: deploy
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CONTENT_REPOSITORY: Nyaecho/blog-content
+  CONTENT_WORKING_COPY: .content-src
+
+jobs:
+  deploy:
+    name: Build and deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CI: true
+      # 让 content:sync 走「本地目录」模式，内容由下面的 checkout 步骤取得。
+      CONTENT_DIR: .content-src
+
+    steps:
+      - name: Resolve content ref
+        id: target
+        # 经 env 传递而不是直接内插到脚本里：client_payload 属于外部输入，
+        # 直接内插会形成 shell 注入面。
+        env:
+          PAYLOAD_SHA: ${{ github.event.client_payload.sha }}
+          INPUT_REF: ${{ github.event.inputs.content_ref }}
+        run: |
+          set -euo pipefail
+          ref="${PAYLOAD_SHA:-}"
+          [ -n "$ref" ] || ref="${INPUT_REF:-}"
+          [ -n "$ref" ] || ref="main"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout theme
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Checkout content
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: ${{ env.CONTENT_REPOSITORY }}
+          ref: ${{ steps.target.outputs.ref }}
+          path: ${{ env.CONTENT_WORKING_COPY }}
+          token: ${{ secrets.CONTENT_REPO_TOKEN }}
+          persist-credentials: false
+
+      - name: Record content commit
+        id: content
+        run: |
+          set -euo pipefail
+          echo "sha=$(git -C '${{ env.CONTENT_WORKING_COPY }}' rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
+        with:
+          version: 9.14.4
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@cdca7365b2dadb8aad0a33bc7601856ffabcc48e # v4.3.0
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Restore build caches
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          # 缩略图按源图内容哈希复用，因此跨 commit 的缓存命中是有效的。
+          path: |
+            .astro
+            node_modules/.astro
+            public/assets/moments/thumbnails
+          key: ${{ runner.os }}-shirone-${{ hashFiles('pnpm-lock.yaml', 'astro.config.mjs') }}-${{ steps.content.outputs.sha }}
+          restore-keys: |
+            ${{ runner.os }}-shirone-${{ hashFiles('pnpm-lock.yaml', 'astro.config.mjs') }}-
+            ${{ runner.os }}-shirone-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --prefer-offline
+
+      # 独立成步，而不是依赖 `pnpm build` 内部再跑一次：
+      # 内容问题（含 config/*.yaml 的类型校验）与构建问题因此在日志里天然分开，
+      # 且 fonts:subset 需要内容与配置都已就位。
+      - name: Materialize content and config
+        run: pnpm content:sync
+
+      - name: Build site
+        run: pnpm build
+        env:
+          # 按需补齐可选功能的凭据。
+          BILI_SESSDATA: ${{ secrets.BILI_SESSDATA }}
+
+      # ───────────────────────────────────────────────────────────────────────
+      # 部署：dist 推 deploy 分支 → 通知服务器拉取 → 轮询部署回执
+      # ───────────────────────────────────────────────────────────────────────
+
+      - name: Push dist to deploy branch
+        env:
+          DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+        run: |
+          set -euo pipefail
+          cd dist
+          git init -q
+          git checkout -q -b deploy
+          git config user.name "deploy-bot"
+          git config user.email "deploy-bot@users.noreply.github.com"
+          git add -A
+          git commit -qm "deploy: content ${{ steps.content.outputs.sha }} (${GITHUB_SHA:0:7})"
+          git push -q --force "https://x-access-token:${DEPLOY_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" deploy:deploy
+          echo "已推送 deploy 分支"
+
+      - name: Notify server and wait for deployment
+        env:
+          HOOK_URL: ${{ secrets.DEPLOY_HOOK_URL }}
+          HOOK_SECRET: ${{ secrets.DEPLOY_HOOK_SECRET }}
+          REPO: ${{ github.repository }}
+          CONTENT_SHA: ${{ steps.content.outputs.sha }}
+        run: |
+          set -euo pipefail
+          payload="{\"repository\":\"$REPO\",\"sha\":\"$CONTENT_SHA\"}"
+          signature=$(printf '%s' "$payload" | openssl dgst -sha256 -hmac "$HOOK_SECRET" -hex | sed 's/^.* //')
+          body=$(curl --fail-with-body --silent --show-error --retry 3 --retry-delay 2 \
+            --max-time 30 --request POST "$HOOK_URL" \
+            --header "Content-Type: application/json" \
+            --header "X-Signature: sha256=$signature" \
+            --data "$payload")
+          echo "服务器受理：$body"
+          ticket=$(printf '%s' "$body" | sed -n 's/.*"ticket":"\([^"]*\)".*/\1/p')
+          if [ -z "$ticket" ]; then
+            echo "::error::服务器未返回 ticket，无法轮询部署状态" >&2
+            exit 1
+          fi
+          # GET 轮询的签名内容为空串，与 admin 侧约定一致
+          poll_sig=$(printf '' | openssl dgst -sha256 -hmac "$HOOK_SECRET" -hex | sed 's/^.* //')
+          # 轮询部署回执，最长 5 分钟
+          deadline=$(( $(date +%s) + 300 ))
+          while :; do
+            sleep 10
+            status_body=$(curl --fail-with-body --silent --show-error --max-time 30 \
+              --header "X-Signature: sha256=$poll_sig" \
+              "$HOOK_URL?ticket=$ticket") || { echo "轮询请求失败，重试…"; continue; }
+            state=$(printf '%s' "$status_body" | sed -n 's/.*"state":"\([^"]*\)".*/\1/p')
+            echo "部署状态：$state"
+            case "$state" in
+              done)
+                echo "✅ 服务器拉取部署完成"
+                break
+                ;;
+              failed)
+                echo "::error::服务器部署失败，详见 admin 日志" >&2
+                printf '%s\n' "$status_body" >&2
+                exit 1
+                ;;
+            esac
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::error::等待服务器部署超时（5 分钟）" >&2
+              exit 1
+            fi
+          done
+
+      - name: Summarize
+        if: always()
+        env:
+          CONTENT_SHA: ${{ steps.content.outputs.sha }}
+          CONTENT_REF: ${{ steps.target.outputs.ref }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### Shirone deploy"
+            echo ""
+            echo "- 内容仓：\`${CONTENT_REPOSITORY}\`"
+            echo "- 内容 ref：\`${CONTENT_REF}\`"
+            echo "- 内容 commit：\`${CONTENT_SHA}\`"
+            echo "- 部署分支：deploy（服务器稀疏拉取 dist/）"
+            if [ -f content.lock.json ]; then
+              echo ""
+              echo "<details><summary>content.lock.json</summary>"
+              echo ""
+              echo '```json'
+              cat content.lock.json
+              echo '```'
+              echo ""
+              echo "</details>"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
