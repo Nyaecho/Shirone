@@ -144,8 +144,10 @@ jobs:
           DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
         run: |
           set -euo pipefail
-          cd dist
-          git init -q
+          # 孤儿分支布局：根下只有 dist/（与服务器 sparse-checkout set dist 对应）
+          git init -q deploy-repo
+          mv dist deploy-repo/dist
+          cd deploy-repo
           git checkout -q -b deploy
           git config user.name "deploy-bot"
           git config user.email "deploy-bot@users.noreply.github.com"
