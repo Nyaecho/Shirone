@@ -179,8 +179,8 @@ jobs:
           fi
           # GET 轮询的签名内容为空串，与 admin 侧约定一致
           poll_sig=$(printf '' | openssl dgst -sha256 -hmac "$HOOK_SECRET" -hex | sed 's/^.* //')
-          # 轮询部署回执，最长 5 分钟
-          deadline=$(( $(date +%s) + 300 ))
+          # 轮询部署回执，最长 16 分钟（服务器侧含 3 次自动重试，慢网下单次 git 可达 300s）
+          deadline=$(( $(date +%s) + 960 ))
           while :; do
             sleep 10
             status_body=$(curl --fail-with-body --silent --show-error --max-time 30 \
