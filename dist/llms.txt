@@ -1,0 +1,18 @@
+# Nyaechoのblog
+
+> welcome to my blog
+
+This is the llms.txt file for Nyaechoのblog. It provides a machine-readable directory of published articles and core pages for Large Language Models.
+
+## Core Pages
+- [Home](https://neecoo.dpdns.org/): Main blog entrance and latest post stream.
+- [About](https://neecoo.dpdns.org/about/): Author profile, technical stack, and background.
+- [Archive](https://neecoo.dpdns.org/archive/): Chronological index of all published writings.
+
+## Articles
+- [支付宝小程序源码提取实录：从模拟器到完整源码](https://neecoo.dpdns.org/2026-09-alipay-mini-program-get/)
+- [使用宝塔从头搭建青龙面板](https://neecoo.dpdns.org/2026-09-qinglong/)
+- [Shirone从零打通博客自动发布链路：跨仓库构建与部署的踩坑实录](https://neecoo.dpdns.org/2026-09-post/): 用可视化写作工具发文 → 内容仓推送 → 主题仓自动构建 → 服务器自动拉取部署，全程无人工干预。
+
+## Full Text Dump
+- [Full Text Archive](https://neecoo.dpdns.org/llms-full.txt): Complete, concatenated Markdown content of all public articles for full-context ingestion.

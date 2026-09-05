@@ -1,0 +1,824 @@
+# Nyaechoのblog - Full Content Archive
+
+> Generated on 2026-09-05. Contains full text of all public articles for LLM ingestion.
+
+---
+
+## 支付宝小程序源码提取实录：从模拟器到完整源码
+
+- **URL**: https://neecoo.dpdns.org/2026-09-alipay-mini-program-get/
+- **Published**: 2026-09-05
+- **Category**: 教程
+- **Tags**: By AI, 经验, 逆向, 小程序
+
+# 支付宝小程序源码提取实录：从模拟器到完整源码
+
+> 本文记录一种从零开始提取支付宝小程序离线包并解出源码的完整流程。整体思路：**在模拟器中打开目标小程序 → 从支付宝本地数据库中找到该小程序的离线包 CDN 地址 → 直接下载官方离线包 → 解包得到源码**。
+>
+> 全程不需要逆向 so、不需要解密，因为支付宝小程序的离线包在官方 CDN 上是公开可下载的，真正难的只是「知道去哪里找这个地址」。
+>
+> 仅供学习研究，请勿用于任何侵权用途。
+
+## 一、原理说明
+
+支付宝小程序（包括 H5 离线应用）在客户端内由几套容器管理：
+
+| 存储/数据库 | 作用 |
+|---|---|
+| `files/nebulaInstallApps/` | 老版 Nebula 容器的离线包目录，存放基础库、公共资源包（明文 tar） |
+| `databases/nebula_app.db` | Nebula 容器的应用注册表 |
+| `databases/nebulax_app.db` | Nebula 容器新版注册表（含资源表和插件表） |
+| `databases/xriver_app.db` | **xriver 容器（当前小程序主力容器）的应用注册表，业务小程序的信息基本都在这里** |
+
+关键点：
+
+1. 业务小程序的离线包本体在本地是加密缓存的（`files/Sandbox/B_xxx/database/ccdn/` 下的 `.dc`/`.mf` 文件），直接解密很麻烦；
+2. 但注册表数据库 `xriver_app.db` 是**标准未加密 SQLite**，里面的 `nebulax_resource_app_table` 表记录了每个小程序的 `package_url` —— 即官方 CDN 上的离线包下载地址（形如 `https://mdn.alipayobjects.com/ccdn/...`）；
+3. 该 CDN 地址可以直接用 HTTP GET 下载，下载得到的文件是一个 **ZIP**，内部包含明文的 `<appId>.tar`，解包即为源码。
+
+所以流程简化为：**root 模拟器 → 拷出 xriver_app.db → 查库拿 package_url → 下载 → 两层解包**。
+
+## 二、环境与工具
+
+| 工具 | 说明 |
+|---|---|
+| MuMu 模拟器 12（Android 12） | 任意**带 root** 的 Android 模拟器均可（MuMu 默认开放 root） |
+| MuMu 自带 adb | 路径：`<MuMu安装目录>\nx_main\adb.exe`，其他模拟器请替换为自己目录下的 adb |
+| 支付宝 App | 模拟器内安装并**登录**（不登录打不开小程序） |
+| Python 3 | 标准库即可（`sqlite3`、`tarfile`），无需额外安装第三方包 |
+| PowerShell / curl | 用于下载离线包 |
+
+## 三、完整流程
+
+### 步骤 1：在模拟器中打开目标小程序
+
+在模拟器的支付宝里搜索并打开目标小程序，随便点几个页面，停留几秒钟。
+
+目的：让客户端向服务端请求该小程序的元信息并写入本地数据库 `xriver_app.db`。离线包本体此时可能只下载了加密缓存，无所谓——我们要的只是数据库里的 CDN 地址。
+
+### 步骤 2：adb 连接模拟器并确认 root
+```powershell
+# 替换为你自己的 adb 路径（MuMu 自带 adb 在 <MuMu安装目录>\nx_main\adb.exe）
+$adb = "<adb路径>"
+
+# 看设备是否已连接
+& $adb devices
+# 输出的第一列即设备 serial（单开模拟器通常为 emulator-5554）：
+# emulator-5554          device product:... model:...
+
+# 后续命令统一用这个变量指定设备
+$dev = "<设备serial>"
+
+# 确认 root 可用（MuMu 默认有 su）
+& $adb -s $dev shell "su -c id"
+# 输出应包含 uid=0(root)
+```
+
+### 步骤 3：拷出支付宝的小程序注册表数据库
+
+`/data/data/` 属于应用私有目录，adb shell 用户无权直接读取，需要通过 `su` 先复制到 `/data/local/tmp/`：
+
+```powershell
+# 把几个相关数据库都拷出来（核心是 xriver_app.db）
+& $adb -s $dev shell 'su -c "cp /data/data/com.eg.android.AlipayGphone/databases/xriver_app.db /data/local/tmp/x.db; cp /data/data/com.eg.android.AlipayGphone/databases/nebulax_app.db /data/local/tmp/nx.db; cp /data/data/com.eg.android.AlipayGphone/databases/nebula_app.db /data/local/tmp/n.db; chmod 644 /data/local/tmp/*.db"'
+
+# 拉取到 Windows 本地
+& $adb -s $dev pull /data/local/tmp/x.db .\x.db
+& $adb -s $dev pull /data/local/tmp/nx.db .\nx.db
+& $adb -s $dev pull /data/local/tmp/n.db .\n.db
+```
+
+### 步骤 4：查询数据库，拿到目标小程序的 CDN 离线包地址
+
+`xriver_app.db` 中的两张核心表：
+
+- `nebulax_resource_app_table` —— 所有已知晓的小程序资源信息（`app_id`、`name`、`version`、`package_url`、`main_url` 等）
+- `nebulax_app_install_table` —— 已安装记录（按 `updateAppTime` 排序，最近打开的小程序会排在最前，即使 `installedPath` 为空也说明刚被访问过）
+
+用 Python 标准库查询（把 `<目标小程序名关键词>` 替换成实际名称的片段，保存为 `find_app.py`）：
+
+```python
+import sqlite3
+
+con = sqlite3.connect("x.db")
+cur = con.cursor()
+
+# 方法一：按最近使用时间排序，刚打开的小程序会排在最前
+for r in cur.execute("""
+    SELECT a.app_id, a.name, a.version, a.package_url
+    FROM nebulax_resource_app_table a
+    JOIN nebulax_app_install_table i ON a.app_id = i.appId
+    ORDER BY CAST(i.updateAppTime AS INTEGER) DESC
+    LIMIT 10
+"""):
+    print(r)
+
+# 方法二：按名称模糊搜索目标小程序
+keyword = "<目标小程序名关键词>"
+for r in cur.execute("""
+    SELECT app_id, name, version, package_url
+    FROM nebulax_resource_app_table
+    WHERE name LIKE ?
+""", (f"%{keyword}%",)):
+    print(r)
+
+con.close()
+```
+
+运行：
+
+```powershell
+python .\find_app.py
+```
+
+输出形如：
+
+```
+('<appId>', '<小程序名>', '<version>', 'https://mdn.alipayobjects.com/ccdn/uri/file/as/1/<appId>/1/mp/<开发者版本>.<时间戳>')
+```
+
+记下 `package_url`。同一条记录里还有几个有用字段：
+
+| 字段 | 含义 |
+|---|---|
+| `package_url` | 离线包完整包下载地址（本文用的就是它） |
+| `fallback_base_url` | 兜底资源目录（图片等静态资源可从这里直接抓） |
+| `main_url` | 入口页面，如 `/index.html#pages/index/index` |
+| `size` | 解压后大致体积 |
+| `extend_info` | 启动参数、组件声明等 JSON |
+| `plugins` | 依赖的插件列表（每个插件有自己的 appId，同样方式可提取） |
+
+### 步骤 5：下载离线包
+
+直接 GET 下载 `package_url`。建议带上浏览器或支付宝 UA（部分 CDN 可能校验）：
+
+```powershell
+$url = "<package_url>"   # 上一步查到的离线包地址
+
+# PowerShell
+Invoke-WebRequest -Uri $url -OutFile .\pkg.bin `
+  -UserAgent "Mozilla/5.0 (Linux; Android 12) Mobile Safari/537.36 AlipayClient"
+
+# 或 curl
+curl -L -o pkg.bin -A "Mozilla/5.0 (Linux; Android 12) AlipayClient" $url
+```
+
+检查文件头判断格式：
+```powershell
+$bytes = [System.IO.File]::ReadAllBytes(".\pkg.bin")[0..15]
+($bytes | ForEach-Object { $_.ToString("X2") }) -join " "
+# 50 4B 03 04 ... → PK.. 即 ZIP 格式
+```
+
+支付宝离线包的外层是一个 ZIP，内含 4 个文件：
+
+```
+<appId>.tar             ← 小程序源码归档（明文 tar）
+CERT.json              ← 证书
+Manifest.xml           ← 包信息（appId、名称、版本）
+SIGN.json              ← 签名
+```
+
+### 步骤 6：两层解包
+
+**第一层：ZIP → tar**
+
+```powershell
+Copy-Item .\pkg.bin .\pkg.zip
+Expand-Archive -Path .\pkg.zip -DestinationPath .\unzip -Force
+```
+
+可先看一眼 `Manifest.xml` 确认没拿错包：
+```powershell
+Get-Content .\unzip\Manifest.xml
+# <package>
+#   <uid><appId></uid>
+#   <name><小程序名></name>
+#   ...
+# </package>
+```
+
+**第二层：tar → 源码**
+
+Windows 10+ 自带 bsdtar，直接：
+
+```powershell
+mkdir .\source
+tar -xf ".\unzip\<appId>.tar" -C .\source
+```
+
+或用 Python（`untar.py`）：
+
+```python
+import tarfile
+
+with tarfile.open(r".\unzip\<appId>.tar", "r:") as tf:
+    tf.extractall(r".\source")
+```
+
+> tar 中的第一个条目名为 `_fileList`，是支付宝自记录的文件清单，属正常现象。
+
+### 步骤 7：查看产物
+
+解包后即得到小程序的完整编译产物：
+
+```
+source/
+├── appConfig.json        # 页面路由、窗口样式等配置（对应 app.json 编译产物）
+├── index.html            # 入口 HTML
+├── index.js              # 主包 JS（webpack 打包，明文可读）
+├── index.worker.js       # worker 层逻辑（通常最大，业务逻辑大头）
+├── splitchunk~N/index.js # 分包/拆分 chunk（数量不定）
+├── manifest.json         # 应用元信息
+├── meta.json
+└── static/               # 全部图片资源（png/jpg/webp）
+```
+
+验证 `index.js` 开头是 `/*!` 注释 + 标准 webpack bundle 结构，说明是**未加密的明文 JS**——变量名经过压缩，但全部业务逻辑、页面路径、接口调用都完整可读，配合 `appConfig.json` 里的页面列表即可通读整个小程序。
+
+## 四、常见问题
+
+**Q：为什么 `nebulaInstallApps` 目录下找不到业务小程序的包？**
+新版支付宝业务小程序走 xriver 容器，本地只落加密缓存；`nebulaInstallApps` 里能直接看到的 tar 多为基础库/公共资源包（小程序基础库、H5 公共资源等）。业务包走本文的数据库 → CDN 路线。
+
+**Q：没有 root 的模拟器行不行？**
+不行，读取 `/data/data/` 必须要 root。MuMu、雷电等主流模拟器默认提供 root。
+
+**Q：下载 CDN 包必须带 UA 吗？**
+实测带支付宝 UA 一定可行；裸 UA 可能也被允许，建议保留以防 CDN 策略校验。
+
+**Q：想提取小程序依赖的插件怎么办？**
+`nebulax_resource_app_table.plugins` 字段是 JSON 数组，里面有每个插件的 appId；插件的下载地址在 `nebulax_resource_plugin_table` 表的 `packageUrl` / `newPackageUrl` 字段，同样直接下载解包即可。
+
+**Q：拿到的 JS 是压缩混淆过的，能还原成工程结构吗？**
+可以进一步处理：用 prettier/js-beautify 格式化，再按 webpack 模块切分（`<moduleId>:function(e){...}` 这类模块边界），可还原出接近源码的模块化结构，工作量视包大小而定。
+
+## 五、流程总结
+
+```
+模拟器登录支付宝 → 打开目标小程序
+        ↓
+adb + su 拷出 databases/xriver_app.db
+        ↓
+sqlite 查 nebulax_resource_app_table → package_url
+        ↓
+HTTP GET 下载（ZIP）
+        ↓
+解压 ZIP → <appId>.tar（明文）
+        ↓
+解包 tar → index.js / appConfig.json / static/ ... = 小程序源码
+```
+
+全程核心命令不过 5 条：`adb shell su -c cp`、`adb pull`、一条 SQL、一次 HTTP 下载、两次解包。
+
+---
+
+*声明：本文仅用于技术学习与研究，小程序源码版权归原开发者所有，请勿用于抄袭、二次分发或其他侵权用途。*
+
+---
+
+## 使用宝塔从头搭建青龙面板
+
+- **URL**: https://neecoo.dpdns.org/2026-09-qinglong/
+- **Published**: 2026-09-05
+- **Category**: 教程
+- **Tags**: 青龙面板, 经验, 学习
+
+## 安装
+
+使用宝塔面板的docker管理器安装是极其方便的，只需要在 `docker` 页的应用商店直接搜索 `青龙面板` ，然后安装即可。可以更改自己知道含义的配置，否则保持默认即可
+
+![0904-54c15cf3.png](./0904-54c15cf3.png)
+
+安装完成后，根据自己选择的端口号，直接用服务器的 \<ip>:<端口号> 即可访问到青龙面板
+
+成功访问之后，就是初始化的引导界面，根据引导填写 通知（底下有跳过）-> 设置账密 即可
+
+## 使用
+
+### 导入脚本
+
+这是一个自动运行脚本的工具，所以你首先要准备脚本，这里默认你已经有自己的脚本（比如自动签到，或者需要定时执行的小任务）。此时需要将其导入到 `脚本管理` 中
+
+![0904-2ae266a4.png](./0904-2ae266a4.png)
+
+这里是用来存放脚本的源码文件的，通过右上角的“+”号进行添加
+
+添加好的文件，在右上角进行保存，然后是 **调试**，这点很重要，在保存后，右上角有调试按钮，调试是为了保证脚本能够正常的执行，通过调试查看运行结果，没有问题后，代表这一阶段完成
+
+tips：可能遇到没有依赖的问题，跳转到
+
+### 创建定时计划
+
+找到 `定时任务` ，右上角创建任务
+
+![0905-0f4e3bb7.png](./0905-0f4e3bb7.png)
+
+名称随便写，用于辨识
+
+命令/脚本 指的是相对于`脚本管理`里的位置，比如 python test.py 或者 test.py，前者的目的是接受指定参数
+
+定时规则 就是用空格分开时间，比如 每周四早上八点一分两秒 将数字按照 秒 分 时 天 月 周 写成 2 1 8 * * 4
+
+### 至此完成了定时脚本的创建
+
+## 遇到的一些问题
+
+### 如果从在配置容器时，没有勾选`允许外部访问` ,怎么改成可以被外部访问
+
+如果是在宝塔的docker的应用商店下载的青龙面板，就会有一个 `容器编排` 页面，里面可以更改配置。而负责管理访问接口的配置，就藏在 .env 里
+
+![0904-4459d465.png](./0904-4459d465.png)
+
+这个配置是管理对外暴露的host的写法
+- 127.0.0.1 -> 外网无法访问
+- 0.0.0.1 -> 外网可以访问
+当然这是建立在开放了防火墙的基础上
+
+### 调试脚本发现缺少依赖
+
+当调试的时候出现“缺少依赖”的报错，比如：
+
+![0905-c2003ebd.png](./0905-c2003ebd.png)
+
+这就需要安装依赖。退出当前页，左侧找到`依赖管理`，点击右上角`创建依赖`（注意选择自己需要的环境下安装依赖）
+
+![0905-ac44d1ee.png](./0905-ac44d1ee.png)
+
+这里的名称比较容易误导，其实就是`依赖组件名称`
+
+如果安装失败，查看日志详情
+
+![0905-88c7e63c.png](./0905-88c7e63c.png)
+
+最可能的情况是遇到网络问题，这个时候就需要设置镜像源
+
+![0905-6a5d73a5.png](./0905-6a5d73a5.png)
+
+设置正确的源后，就可以重新安装依赖了。
+
+国内可用源：
+- 清华大学镜像源: https://pypi.tuna.tsinghua.edu.cn/simple
+- 阿里云镜像源: https://mirrors.aliyun.com/pypi/simple/
+- 中国科学技术大学镜像源: https://pypi.mirrors.ustc.edu.cn/simple/
+- 腾讯云镜像源: https://mirrors.cloud.tencent.com/pypi/simple/
+- 华为云镜像源: https://repo.huaweicloud.com/repository/pypi/simple/
+
+---
+
+## Shirone从零打通博客自动发布链路：跨仓库构建与部署的踩坑实录
+
+- **URL**: https://neecoo.dpdns.org/2026-09-post/
+- **Published**: 2026-09-04
+- **Category**: 指南
+- **Tags**: 踩坑, 经验, 博客, github action, By AI
+- **Description**: 用可视化写作工具发文 → 内容仓推送 → 主题仓自动构建 → 服务器自动拉取部署，全程无人工干预。
+
+# 从零打通博客自动发布链路：跨仓库构建与部署的踩坑实录
+
+> 目标：用可视化写作工具发文 → 内容仓推送 → 主题仓自动构建 → 服务器自动拉取部署，全程无人工干预。
+> 实际用时：一天。其中真正"通"的时间不到一半，剩下全在填坑。
+> 这篇文章先完整讲清整条链路的搭建步骤（可照抄实践），再复盘我们趟过的每一个坑——有些是上游模板自带的 bug，有些是我的低级失误，有些是冷知识。希望你能少走弯路。
+
+## 一、架构总览
+
+整个系统由四个部分组成：
+```mermaid
+flowchart LR
+    A["admin 写作工具"] -->|"Contents API"| B["blog-content 内容仓"]
+    B -->|"repository_dispatch"| C["Shirone 主题仓"]
+    C -->|"build + 推 deploy 分支"| D["服务器（nginx + git）"]
+```
+
+1. **admin（自研写作工具）**：浏览器表单化写文章/动态，通过 GitHub Contents API 直接提交到内容仓。零构建，Node 单文件起服务。
+2. **内容仓（私有）**：只放 Markdown、图片、配置。push 后由 Actions 做内容校验，再向主题仓发 `repository_dispatch`。
+3. **主题仓（公开）**：收到派发信号后 checkout 内容仓 → 构建静态站 → 把 `dist/` 以孤儿提交强推到 `deploy` 分支 → webhook 通知服务器。
+4. **服务器**：admin 收到 webhook（HMAC 验签）后，在服务器上对稀疏克隆的仓库执行 `git fetch --depth 1 && git reset --hard`，nginx root 指向 `dist/` 不变。
+
+为什么选"deploy 分支"而不是 rsync / artifact 下载？三个理由：
+
+- 服务器端退化成最普通的 `git pull`，不需要 SSH 私钥、不需要 API 调用；
+- **天然带版本历史**，回滚就是 `git reset` 到旧提交，秒级；
+- 每次都是孤儿提交（无历史父节点），分支体积不会累积膨胀。
+
+## 二、完整搭建流程
+
+按顺序做完这五步，链路即通。每一步都给出关键配置，坑的细节留到第三章。
+
+### 第 1 步：准备仓库与令牌
+
+三个仓库各司其职：
+
+| 仓库 | 可见性 | 职责 |
+|---|---|---|
+| 主题仓（Shirone） | 公开 | 主题代码 + 构建流水线 + `deploy` 产物分支 |
+| 内容仓（blog-content） | 私有 | Markdown 文章/动态、图片、站点配置 |
+| admin 工具仓 | 私有 | 写作工具源码，部署在服务器上 |
+
+**令牌**：只需一枚 Fine-grained PAT——Repository access 同时勾选主题仓和内容仓，Permissions 给 `Contents: Read and write`。简单场景不必拆成多枚最小权限 token，但务必设置过期时间。
+
+**随机密钥**：服务器上 `openssl rand -hex 32` 生成一枚，后续两处填同一个值（webhook 验签用）。
+
+### 第 2 步：内容仓——触发工作流
+
+`.github/workflows/trigger-build.yml`（注意 `repository:` 要改成你自己的主题仓）：
+
+```yaml
+name: Trigger Theme Build
+
+on:
+  push:
+    branches: [main]
+    paths:                      # 只有内容真正变化才触发，改 README 不算
+      - "content/**"
+      - "config/**"
+      - "data/**"
+      - "assets/**"
+      - "public/**"
+  workflow_dispatch: {}
+
+concurrency:                    # 高频推送时自动取消旧的，只保留最新一次
+  group: trigger-build
+  cancel-in-progress: true
+
+jobs:
+  validate:                     # 先校验：内容格式错误在源头拦截
+    uses: YOUR_NAME/YOUR_THEME/.github/workflows/content-validate.yml@main
+    with:
+      theme_repository: YOUR_NAME/YOUR_THEME
+
+  dispatch:                     # 校验通过再派发，携带本次 SHA 供主题仓精准取版
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch build event
+        env:
+          HAS_TOKEN: ${{ secrets.DISPATCH_TOKEN != '' }}
+        if: env.HAS_TOKEN == 'true'
+        uses: peter-evans/repository-dispatch@v4
+        with:
+          token: ${{ secrets.DISPATCH_TOKEN }}
+          repository: YOUR_NAME/YOUR_THEME
+          event-type: content-updated
+          client-payload: '{"sha": "${{ github.sha }}"}'
+```
+
+内容仓 Secrets 配置：`DISPATCH_TOKEN` = 你的 PAT。
+
+### 第 3 步：主题仓——构建与推送产物
+
+`.github/workflows/deploy.yml` 骨架（省略缓存等优化，完整版见主题仓）：
+
+```yaml
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  repository_dispatch:          # 响应内容仓的派发
+    types: [content-updated]
+  workflow_dispatch: {}         # 手动触发，回滚/首次部署用
+
+concurrency:
+  group: deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      CONTENT_DIR: .content-src
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout content  # 按派发携带的 SHA 精准拉取内容仓
+        uses: actions/checkout@v4
+        with:
+          repository: YOUR_NAME/YOUR_CONTENT_REPO
+          ref: ${{ github.event.client_payload.sha }}
+          path: .content-src
+          token: ${{ secrets.CONTENT_REPO_TOKEN }}
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm content:sync  # 内容物化 + 配置覆盖
+      - run: pnpm build         # 静态构建，产物在 dist/
+
+      - name: Push dist to deploy branch   # 孤儿提交强推，分支只含 dist/
+        env:
+          DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+        run: |
+          git init -q deploy-repo
+          mv dist deploy-repo/dist
+          cd deploy-repo
+          git checkout -q -b deploy
+          git config user.name "deploy-bot"
+          git config user.email "deploy-bot@users.noreply.github.com"
+          git add -A
+          git commit -qm "deploy: content ${{ github.sha }}"
+          git push -q --force \
+            "https://x-access-token:${DEPLOY_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            deploy:deploy
+
+      - name: Notify server and wait for deployment    # 通知 + 轮询
+        env:
+          HOOK_URL: ${{ secrets.DEPLOY_HOOK_URL }}
+          HOOK_SECRET: ${{ secrets.DEPLOY_HOOK_SECRET }}
+        run: |
+          payload='{"repository":"'$GITHUB_REPOSITORY'","sha":"'$CONTENT_SHA'"}'
+          signature=$(printf '%s' "$payload" \
+            | openssl dgst -sha256 -hmac "$HOOK_SECRET" -hex | sed 's/^.* //')
+          body=$(curl --fail-with-body -sS --request POST "$HOOK_URL" \
+            --header "X-Signature: sha256=$signature" --data "$payload")
+          ticket=$(printf '%s' "$body" | sed -n 's/.*"ticket":"\([^"]*\)".*/\1/p')
+          # 每 10 秒轮询一次 ticket 状态，直到 done / failed / 超时
+          # （完整轮询循环见主题仓 deploy.yml）
+```
+
+主题仓 Secrets 一览：
+
+| Secret | 值 |
+|---|---|
+| `CONTENT_REPO_TOKEN` | PAT（拉内容仓） |
+| `DEPLOY_TOKEN` | PAT（推 deploy 分支） |
+| `DEPLOY_HOOK_URL` | `https://admin.你的域名/api/deploy/hook` |
+| `DEPLOY_HOOK_SECRET` | 第 1 步生成的随机串 |
+
+### 第 4 步：服务器——稀疏克隆与 admin 部署
+
+**一次性初始化**——稀疏克隆产物仓库（磁盘上只会有 `dist/`，没有源码和历史）：
+
+```bash
+git clone --filter=blob:none --no-checkout --single-branch \
+     --branch deploy https://github.com/YOUR_NAME/YOUR_THEME.git /www/wwwroot/blog
+cd /www/wwwroot/blog
+git sparse-checkout set dist
+```
+
+**部署 admin**（Node 20+，以宝塔 Node 项目为例）：
+
+```bash
+git clone https://github.com/YOUR_NAME/YOUR_ADMIN.git /www/wwwroot/blog-admin
+cd /www/wwwroot/blog-admin && npm install --omit=dev
+cp .env.example .env
+```
+
+`.env` 关键项：
+
+```ini
+ADMIN_PASSWORD=<登录密码>
+GITHUB_TOKEN=<PAT>          # 推文章用
+GITHUB_OWNER=<你的用户名>
+GITHUB_REPO=<内容仓名>
+DEPLOY_SECRET=<第 1 步的随机串>   # 与 DEPLOY_HOOK_SECRET 相同
+DEPLOY_DIR=/www/wwwroot/blog
+DEPLOY_BRANCH=deploy
+```
+
+admin 收到 webhook 后的核心逻辑只有两行 git：
+
+```js
+git(dir, ["fetch", "origin", branch, "--depth=1"]);
+git(dir, ["reset", "--hard", "FETCH_HEAD"]);
+```
+
+配合 `sparse-checkout`，这两行就是"部署"的全部。
+
+**nginx**：博客站点 `root /www/wwwroot/blog/dist;`；admin 站点反代 `127.0.0.1:3777` 并带上 `X-Forwarded-Proto` 头。
+
+### 第 5 步：端到端验证
+
+admin 发一条动态 → 内容仓 Actions 校验+派发全绿 → 主题仓 Actions 构建全绿 → 日志末尾出现"服务器拉取部署完成" → 刷新博客看到内容上线。全链路 3~4 分钟。
+
+## 三、坑点集锦
+
+链路能跑通只是及格线。以下 10 个坑，每一个都真实地消耗了我们排障时间——建议搭建前通读一遍，尤其是 3、4、5 这三个"静默失败"。
+
+### 坑 1：`secrets` 不能用在 step 级 `if` 里
+
+**现象**：内容仓 workflow 直接报错无法运行：
+
+```
+Invalid workflow file
+(Line: 41, Col: 13): Unrecognized named-value: 'secrets'.
+Located at position 1 within expression: secrets.DISPATCH_TOKEN != ''
+```
+
+**原因**：GitHub Actions 的 `secrets` 上下文在 **job 级 `if`** 里可用，但在 **step 级 `if`** 里不可用。这是官方文档里写得很隐蔽的限制。上游主题模板自带的 `trigger-build.yml.example` 就踩了这个雷——而模板作者大概率从没实际启用过这个文件（它以 `.example` 后缀存在，启用前不会被 Actions 解析）。
+
+**解法**：经典的 env 中转：
+
+```yaml
+- name: Dispatch build event
+  env:
+    HAS_TOKEN: ${{ secrets.DISPATCH_TOKEN != '' }}   # env 赋值处可以用 secrets
+  if: env.HAS_TOKEN == 'true'                        # if 里只引用 env
+```
+
+### 坑 2：私有仓的 token 权限问题表现为 404 而不是 403
+
+**现象**：admin 打开就弹 `GitHub API 404 : Not Found`。
+
+**原因**：GitHub 对私有仓库的设计是——**token 看不到这个仓库时返回 404**，而不是 403，为了避免泄露仓库的存在性。当时手头有好几枚 PAT（主题仓一枚、内容仓一枚），`.env` 里贴错了仓库的 token，于是"仓库存在但无权访问"被表现成了"仓库不存在"。
+
+**教训**：多枚 PAT 并存时，先写好"哪枚 token 管哪个仓"的对照表再动手。Fine-grained PAT 的 Repository access 是显式勾选的，勾了 A 仓就绝对访问不了 B 仓。诊断时直接：
+```bash
+curl -s -w "%{http_code}" -H "Authorization: Bearer $TOKEN" \
+  https://api.github.com/repos/OWNER/REPO
+```
+
+404 = token 不认这个仓，401 = token 本身无效，200 = 通了。
+
+### 坑 3：GitHub Trees API 与本地文件树的类型不一致
+
+**现象**：admin 登录正常、API 全部 200、不报任何错，但文章/动态列表**恒为空**。
+
+**原因**：存储层有两个实现——DEV 模式读本地磁盘，生产模式调 GitHub API。GitHub Trees API 返回的文件类型是 `"blob"`、目录是 `"tree"`；而本地实现返回 `"file"` / `"dir"`。消费端写的是 `if (item.type !== "file") continue;`——DEV 模式一切正常，一上生产，每个文件都被静默过滤，返回空数组。
+
+```js
+// 修复：在生产实现的出口做类型归一化
+const TYPE_MAP = { blob: "file", tree: "dir" };
+return items.map((i) => ({ path: i.path, type: TYPE_MAP[i.type] || i.type }));
+```
+
+**教训**：同一个接口有多个后端实现时，**类型契约必须在出口处归一化**，否则 DEV 测不出来、生产必炸。这类"安静的 bug"比报错的可怕得多——API 200 让你完全怀疑不到代码层。
+
+### 坑 4：YAML 引号时间戳过不了 Astro 的 z.date() 校验
+
+**现象**：内容仓校验 job 失败：
+
+```
+[InvalidContentEntryDataError] moments → 2026-09-04-post
+data does not match collection schema
+```
+
+**原因**：一条链式的类型丢失——
+
+1. admin 生成 frontmatter 时为了防特殊字符歧义，全局设了 `defaultStringType: "QUOTE_DOUBLE"`，所有字符串值都带双引号输出；
+2. 主题的 content schema 要求 `published: z.date()`；
+3. Astro 内容层用 gray-matter 解析 frontmatter，其 YAML 解析遵循 **YAML 1.1 语义**：**无引号**的 `2026-09-04 05:50:13` 才会被识别为 timestamp 解析成 `Date`；**带引号就恒为 string**，直接被 `z.date()` 拒掉。
+
+```yaml
+published: "2026-09-04 05:50:13"   # ✗ 解析为 string，校验失败
+published: 2026-09-04 05:50:13     # ✓ 解析为 Date，校验通过
+```
+
+**修复**：序列化后做行级后处理，只对命中日期时间格式的值剥引号：
+```js
+raw.split("\n").map((line) =>
+  line.replace(
+    /^(\s*)([\w-]+): "(\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?)?)"$/,
+    "$1$2: $3",
+  ),
+).join("\n");
+```
+
+期间还尝试过 yaml 库的 `Scalar + format: "PLAIN"`、`new Scalar(v, { tag })` 等方案，全部无效——`QUOTE_DOUBLE` 默认的优先级压过了这些设置。正则后处理虽然"不优雅"，但它**确定性地工作**。
+
+### 坑 5：Express 路由级 raw-body 捕获静默失效
+
+**现象**：Actions 通知服务器时，admin 返回 500。
+
+**原因**：部署 webhook 需要 HMAC 验签，签名要算在**原始请求字节**上，所以需要捕获 rawBody。当时的写法：
+
+```js
+// server.js
+app.use(express.json({ limit: "2mb" }));       // 全局解析
+
+// routes/api.js
+const deployRawBody = express.json({           // 路由级再来一次，带 verify
+  verify: (req, _res, buf) => { req.rawBody = buf; },
+});
+router.post("/deploy/hook", deployRawBody, ...);
+```
+
+问题在于 body-parser 内部机制：全局 `express.json()` 解析后会在 req 上标记 `req._body = true`，路由级的解析器看到这个标记会**直接跳过**——连 `verify` 回调都不执行。于是 `req.rawBody` 是 `undefined`，`crypto.createHmac().update(undefined)` 抛 TypeError → 500。
+
+更阴险的是，本地测试时用浏览器裸 POST（不带签名头），代码在"签名头不存在的"分支就返回 401 了，根本走不到 update 那一行——**测试路径完美掩盖了 bug**。直到 Actions 带着正确签名头打过来才引爆。
+
+**解法**：rawBody 捕获挪到全局解析器的 `verify` 里，一处捕获处处可用：
+
+```js
+app.use(express.json({
+  limit: "2mb",
+  verify: (req, _res, buf) => { req.rawBody = buf; },
+}));
+```
+
+### 坑 6：CSS `display` 声明会顶掉 HTML `hidden` 属性
+
+**现象**：明明是生产模式，界面却显示"DEV 下载模式"徽标。
+
+**原因**：JS 逻辑完全正确（服务端返回 `devMode: false`，前端也确实没移除 `hidden` 属性，DOM 检查 `el.hidden === true`），但 CSS 里 `.badge { display: inline-flex }` 的优先级**高于**浏览器对 `[hidden]` 属性默认的 `display: none`。于是元素"逻辑上隐藏、样式上可见"。
+
+**解法**：一条全局规则，让 `hidden` 永远赢：
+
+```css
+[hidden] { display: none !important; }
+```
+
+**教训**：HTML 的 `hidden` 属性只是"未样式化的默认"，任何显式 `display` 都会覆盖它。只要页面里有元素类设了 display，就该配这条防御性规则。
+
+### 坑 7：创建孤儿分支的正确姿势（以及我搞砸的两次）
+
+需求：把本地 `dist/` 推成一个只含产物的 `deploy` 孤儿分支。听起来简单，实际连翻两次车：
+
+**翻车一**：`git switch --orphan deploy` 被工作区未提交改动拦截（安全机制，正常），改用 plumbing 命令（`update-index` + `write-tree` + `commit-tree`）时，在错误的 index 状态下 `write-tree` 把 **main 的完整目录树**写了进去，推上去一个 56MB 的"孤儿"分支——它确实无 parent，但内容是整个项目。
+
+**翻车二**：用临时 worktree 方案重做，命令本身对了，但**终端当时 cd 在另一个仓库里**，整串操作（worktree、提交、push）全部落在了错误的仓库上；而随后的验证命令也在同一个错误仓库里执行，看到了那个仓库的 `origin/deploy`，得出"成功"的假象。直到用 `rev-list --count`（提交数）、`cat-file -p`（查 parent 行）这类**不可伪造的指标**重新硬核验证，才发现远端根本没变。
+
+**正确姿势**（Windows PowerShell，全程显式路径，绝不依赖 cwd）：
+
+```powershell
+$tmp = "$env:TEMP\deploy-$PID"
+New-Item -ItemType Directory "$tmp\dist" -Force
+Copy-Item "D:\project\Shirone\dist\*" "$tmp\dist\" -Recurse
+git -C $tmp init -q -b deploy
+git -C $tmp add -A
+git -C $tmp commit -qm "deploy: ..."
+git -C $tmp push --force https://github.com/OWNER/REPO.git deploy:deploy
+Remove-Item -Recurse -Force $tmp
+```
+
+**教训**：① shell 里连续操作多个仓库时，每条 git 命令都带 `-C <绝对路径>`；② 验证结果要用结构性指标（提交数、树内容、parent 行），不要只看命令退出码，**尤其是在错误的目录里连验证都是错的**。
+
+### 坑 8：`safe.directory` 只认属主 UID，不看组
+
+**现象**：服务器上操作 git 仓库连环报 `fatal: detected dubious ownership`。明明做过 `chown -R www-data:neeco`，为什么 neeco 还是"疑权"？
+
+**原因**：git 的 safe.directory 机制**只信任仓库属主的 UID**，组权限再开也不行。而这条链路上天然存在三个 git 用户：`neeco`（SSH 登录）、`www-data`/`www`（服务进程）、`root`（sudo 操作），谁克隆的仓库对另外两家都是"dubious"。
+
+**解法**（组合拳）：
+
+```bash
+# 1. 仓库统一归属给服务进程用户（它要写 .git，最重要）
+sudo chown -R www:www /www/wwwroot/blog
+
+# 2. 人类用户加个人例外（写进自己的 ~/.gitconfig）
+git config --global --add safe.directory /www/wwwroot/blog
+
+# 3. root 也加一份（sudo 操作时生效）
+sudo git config --global --add safe.directory /www/wwwroot/blog
+
+# 4. 应用进程里执行 git 时，直接带参数，不依赖任何 global config
+execFileSync("git", ["-c", `safe.directory=${dir}`, "-C", dir, ...args])
+```
+
+### 坑 9：宝塔的 `www` ≠ Ubuntu 的 `www-data`
+
+**现象**：权限明明 `chown -R www-data:www-data` 了，部署时还是 `cannot open '.git/FETCH_HEAD': Permission denied`。
+
+**原因**：`ps aux` 一查，admin 进程的用户是 **`www`**——宝塔面板自建的用户，和 Ubuntu 系统自带的 `www-data` **是两个不同的用户**。宝塔的 Node 项目管理器和它的 nginx 都用 `www` 跑，而我在 systemd 时代的习惯（`User=www-data`）先入为主了。
+
+**教训**：环境迁移（systemd → 宝塔）时，**一切以 `ps aux` 的实际输出为准**，不要凭上一个环境的经验。一行命令的事：
+
+```bash
+ps aux | grep node | grep -v grep
+```
+
+### 坑 10：www-data 没有 HOME，`git config --global` 会炸
+
+给服务用户加 safe.directory 例外时：
+
+```
+error: could not lock config file /var/www/.gitconfig: No such file or directory
+```
+
+`--global` 写的是 `$HOME/.gitconfig`，而 `www-data`/`www` 这类非登录用户的 HOME 目录根本不存在。先 `mkdir -p` 再执行；或者干脆走坑 8 的第 4 招——应用侧 `-c` 参数内联，绕开 global config 依赖。
+
+## 四、一些设计决策的回望
+
+**为什么 webhook 要带 HMAC 而不是简单密码**：hook 端点暴露在公网（Actions 要能调到它），一个静态密码会在每个请求里明文传输。HMAC-SHA256 对 payload 签名，密钥不出现在请求中，且防篡改。实现上有个细节：轮询用的 GET 没有请求体，签名约定对**空串**计算——两端必须一致，否则永远 401。
+
+**为什么 Actions 要轮询等部署完成**：如果通知完就走，workflow 绿了但服务器可能拉取失败，链路断了都不知道。轮询 ticket 到 `done`/`failed` 才结束，把"服务器真的部署成功了吗"纳入 CI 的成败判定里。代价是 Actions 要多跑一两分钟，但换来了**端到端的可观测性**——这次排障中，"轮询返回的错误详情"（FETCH_HEAD Permission denied）直接把问题钉死，不用登服务器翻日志。
+
+**为什么服务器拉取用 `--depth=1` + `reset --hard`**：部署只关心最新状态，浅拉取省带宽；`reset --hard FETCH_HEAD` 天然幂等，重复触发无副作用。配合稀疏克隆（`--filter=blob:none` + `sparse-checkout set dist`），服务器磁盘上只有产物，没有源码和历史包袱。
+
+**回滚的意外收获**：deploy 分支每次部署一个孤儿提交，天然形成版本序列。回滚 = 服务器上 `git fetch --depth=50 && git reset --hard <旧提交>`，秒级完成，这是当初选分支方案时没充分预料到的红利。
+
+## 五、最终链路与验证
+
+全自动流水线的完整形态：
+
+| 步骤 | 触发方式 | 耗时 |
+|---|---|---|
+| admin 写作 → 推内容仓 | 表单保存（Contents API） | 秒级 |
+| 内容仓校验 + 派发 | push 自动 | ~1 分钟 |
+| 主题仓构建 + 推 deploy 分支 | repository_dispatch 自动 | ~2 分钟 |
+| 服务器拉取 + 上线 | webhook 自动 | 秒级 |
+| Actions 确认部署结果 | 轮询 ticket | 含在上一步 |
+
+端到端验证方法：admin 发一条动态 → 盯着 Actions 全绿 → 刷新博客看到内容上线。全链路 3~4 分钟，人类只负责写字。
+
+## 六、写在最后
+
+复盘这一天，坑的分布很有意思：
+
+- **上游模板的坑**（2 个）：`secrets` 限制、部署路径不一致——模板功能看似齐全，实际是"没被实战跑通"的代码；
+- **自研代码的坑**（4 个）：类型契约、YAML 时间戳、rawBody 捕获、CSS hidden——每一个都是"本地测试好好的"的静默故障；
+- **环境与权限的坑**（4 个）：safe.directory、用户名错位、HOME 缺失、目录属主——跨服务器部署永远的经典节目。
+
+如果只能留三条经验：
+
+1. **静默失败比报错可怕**——API 返回 200 不代表数据正确，测试路径覆盖不到的分支，生产环境会替你覆盖；
+2. **验证要用不可伪造的指标**——退出码会说谎（尤其在错误的目录里），但提交数、类型、结构不会；
+3. **权限问题先 `ps aux` 再 `ls -l`**——先确认"进程到底是谁"，再看"文件到底归谁"，顺序反了就是无休止的瞎猜。
