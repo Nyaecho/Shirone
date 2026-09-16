@@ -1,0 +1,140 @@
+/* pet-page.css — /pet/ 玩耍页的页面级样式（独立页，不依赖博客主题）
+   宠物本体渲染样式（#pet-root/.pet-video/.pet-hit/.pet-bubble）由 deskpet.js 注入，
+   这里只放页面自身：说明、点播面板、降级提示、署名。 */
+
+:root {
+	--bg-color: #f6f7fb;
+	--text-color: #24304a;
+	--primary-color: #4d6bfe;
+	--shadow-color: rgba(36, 48, 74, 0.16);
+}
+
+@media (prefers-color-scheme: dark) {
+	:root {
+		--bg-color: #171923;
+		--text-color: #d7dcf0;
+		--shadow-color: rgba(0, 0, 0, 0.45);
+	}
+}
+
+* {
+	box-sizing: border-box;
+}
+
+body {
+	margin: 0;
+	background: var(--bg-color);
+	color: var(--text-color);
+	font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC",
+		"Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+	line-height: 1.6;
+	transition: background 0.25s ease, color 0.25s ease;
+}
+
+.pet-shell {
+	max-width: 640px;
+	margin: 0 auto;
+	padding: 40px 20px 0;
+}
+
+.pet-back {
+	display: inline-block;
+	font-size: 14px;
+	color: var(--primary-color);
+	text-decoration: none;
+	margin-bottom: 18px;
+}
+
+.pet-back:hover {
+	opacity: 0.8;
+}
+
+.pet-title {
+	font-size: 26px;
+	font-weight: 700;
+	margin: 0 0 6px;
+}
+
+.pet-sub {
+	font-size: 14px;
+	opacity: 0.75;
+	margin: 0 0 10px;
+}
+
+/* 给贴地行走的宠物留出视觉空间 */
+.pet-main {
+	max-width: 640px;
+	padding-bottom: 40vh;
+}
+
+.pet-hint {
+	font-size: 13px;
+	opacity: 0.65;
+	margin: 4px 0 22px;
+}
+
+.pet-picker-label {
+	font-size: 13px;
+	font-weight: 600;
+	opacity: 0.8;
+	margin: 0 0 8px;
+}
+
+.pet-chips {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin-bottom: 18px;
+}
+
+.pet-chip {
+	border: 1px solid var(--shadow-color);
+	border-radius: 999px;
+	background: var(--bg-color);
+	color: var(--text-color);
+	font-size: 13px;
+	padding: 6px 14px;
+	cursor: pointer;
+	transition: transform 0.12s ease, background 0.12s ease;
+}
+
+.pet-chip:hover {
+	transform: translateY(-2px);
+	background: rgba(77, 107, 254, 0.12);
+}
+
+.pet-chip:active {
+	transform: translateY(0);
+}
+
+/* 分类随机按钮与单个动作区分开一层视觉 */
+.pet-chip.cat {
+	background: rgba(77, 107, 254, 0.1);
+	border-color: rgba(77, 107, 254, 0.35);
+}
+
+.pet-unsupported {
+	display: none;
+	padding: 14px 16px;
+	border-radius: 10px;
+	background: rgba(255, 165, 0, 0.1);
+	border: 1px solid rgba(255, 165, 0, 0.35);
+	font-size: 14px;
+	line-height: 1.6;
+}
+
+.pet-unsupported.show {
+	display: block;
+}
+
+.pet-credit {
+	font-size: 12px;
+	opacity: 0.55;
+	line-height: 1.7;
+	margin-top: 26px;
+}
+
+.pet-credit a {
+	color: var(--primary-color);
+	margin-left: 6px;
+}
