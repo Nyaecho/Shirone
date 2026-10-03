@@ -1,0 +1,2543 @@
+<?xml version="1.0" encoding="UTF-8"?><rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><title>Nyaechoのblog</title><description>welcome to my blog</description><link>https://neecoo.dpdns.org/</link><language>zh_CN</language><item><title>一次完整的加固 App 逆向：从内存修复 dex 到自造加密请求</title><link>https://neecoo.dpdns.org/2026-09-app-dex/</link><guid isPermaLink="true">https://neecoo.dpdns.org/2026-09-app-dex/</guid><pubDate>Fri, 25 Sep 2026 15:23:19 GMT</pubDate><content:encoded>&lt;h1&gt;一次完整的加固 App 逆向：从内存修复 dex 到自造加密请求&lt;/h1&gt;
+&lt;blockquote&gt;
+&lt;p&gt;目标 App：某高校第二课堂平台（网易易盾加固，v4.9.1）。目标：完全脱离 App，用脚本自造它的加密请求（登录、搜索、报名全流程）。
+环境：MuMu 模拟器（Android 12 x86_64，root）+ mitmproxy + jadx + capstone + Python。&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;h2&gt;0. 战役总览&lt;/h2&gt;
+&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;阶段&lt;/th&gt;
+&lt;th&gt;手段&lt;/th&gt;
+&lt;th&gt;结果&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;侦察&lt;/td&gt;
+&lt;td&gt;jadx / 抓包&lt;/td&gt;
+&lt;td&gt;识别加固；拿到密文与明文响应&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;编码层&lt;/td&gt;
+&lt;td&gt;抓包样本逆向&lt;/td&gt;
+&lt;td&gt;b64+wrap60 双层编码，byte 级复刻&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;碰壁&lt;/td&gt;
+&lt;td&gt;frida / BlackDex&lt;/td&gt;
+&lt;td&gt;全部被反调试击落&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;strong&gt;脱壳&lt;/strong&gt;&lt;/td&gt;
+&lt;td&gt;/proc/pid/mem + dex 头修复&lt;/td&gt;
+&lt;td&gt;拿到全部业务代码&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;strong&gt;密钥&lt;/strong&gt;&lt;/td&gt;
+&lt;td&gt;运行时 dump .so + capstone&lt;/td&gt;
+&lt;td&gt;RSA n/e、两个 AES IV&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;strong&gt;算法&lt;/strong&gt;&lt;/td&gt;
+&lt;td&gt;反编译源逐行还原&lt;/td&gt;
+&lt;td&gt;signToken / 混合加密全链路&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;strong&gt;排障&lt;/strong&gt;&lt;/td&gt;
+&lt;td&gt;堆取证 + 碰撞搜索&lt;/td&gt;
+&lt;td&gt;揪出最后三个隐蔽 bug&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;验证&lt;/td&gt;
+&lt;td&gt;自造请求实测&lt;/td&gt;
+&lt;td&gt;登录/读 6 接口/报名/取消全通&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;h2&gt;1. 侦察：先分清&quot;哪一层在挡你&quot;&lt;/h2&gt;
+&lt;p&gt;jadx 打开 APK 只有 31 个文件，&lt;code&gt;com.netease.nis.wrapper.MyApplication&lt;/code&gt; —— 标准易盾加固。此时不要急着对抗，先抓包（CA 用 tmpfs 覆盖法装进系统证书库 + &lt;code&gt;adb reverse&lt;/code&gt;）。&lt;/p&gt;
+&lt;p&gt;抓到的请求形态很有信息量：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;POST https://appdmkj.5idream.net/v2/activity/activities
+standardUA: {fastjson 的 Device JSON}
+d=&amp;lt;一大坨含 %20 的 base64&amp;gt;
+
+→ 响应：明文 JSON {&quot;code&quot;:&quot;100&quot;,&quot;data&quot;:{...}}
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;&lt;strong&gt;请求加密、响应明文&lt;/strong&gt;——意味着只需要攻破&quot;请求怎么造&quot;这一个问题。错误码也值得先摸清：&lt;code&gt;11002&lt;/code&gt; 参数错误（解密失败无差别返回）、&lt;code&gt;10007&lt;/code&gt; 登录失效、&lt;code&gt;11111&lt;/code&gt; 业务提示。&lt;/p&gt;
+&lt;h2&gt;2. 编码层：宽松 base64 解码器的静默陷阱&lt;/h2&gt;
+&lt;p&gt;把 &lt;code&gt;d=&lt;/code&gt; 解开（去 %20、b64）得到一串&quot;内层 base64&quot;，里面混着空格和 &lt;code&gt;=&lt;/code&gt;。第一直觉写个宽松解码器全解——&lt;strong&gt;错&lt;/strong&gt;。宽松解码器遇到中段的 &lt;code&gt;=&lt;/code&gt; 会静默截断，导致段结构判断全错（我一度把密文块数算错）。&lt;/p&gt;
+&lt;p&gt;正确做法：把内层字符串&lt;strong&gt;按 &lt;code&gt;=&lt;/code&gt; 边界手工分段&lt;/strong&gt;，再逐段解码。最后还原出的编码管线：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;密文1_b64(wrap60: 每60有效字符插一个空格) + 密文2_b64(不wrap) + ...
+→ 整体再 b64 → 再 wrap60 → urlencode(仅空格和&apos;=&apos;被编码)
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;验证标准不是&quot;看起来对&quot;，而是 &lt;strong&gt;&lt;code&gt;encode(decode(x)) == x&lt;/code&gt; 对全部 76 个抓包样本逐字节成立&lt;/strong&gt;。这个恒等式后面帮了大忙——它把&quot;编码层&quot;从嫌疑列表里彻底排除。&lt;/p&gt;
+&lt;h2&gt;3. 碰壁：反调试的正确姿势是绕开，不是硬刚&lt;/h2&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;frida attach&lt;/strong&gt;：进程秒死。attach/spawn 都一样。&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;frida spawn + 反反调试补丁&lt;/strong&gt;：native 初始化阶段的检测，脚本还没跑起来人就没了。&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;BlackDex&lt;/strong&gt;（虚拟化脱壳）：模拟器是 x86_64 + arm64 翻译环境，它自己的 arm64 库加载失败，&lt;code&gt;ClassNotFoundException&lt;/code&gt;。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;三次失败后换了思路：&lt;strong&gt;不注入、不 hook，直接读 &lt;code&gt;/proc/pid/mem&lt;/code&gt;&lt;/strong&gt;。root 下 &lt;code&gt;dd&lt;/code&gt; 转储内存进程不会死（易盾的检测在 native 层盯着 frida/gdb 的特征，没盯着朴素的我）。这个决定是整场战役的转折点。&lt;/p&gt;
+&lt;h2&gt;4. 转机一：所谓&quot;抹掉 dex 头&quot;，其实只抹了 4 个字节&lt;/h2&gt;
+&lt;p&gt;社区流传&quot;易盾 anti-dump 会抹 dex 头&quot;。之前的 endian_tag 扫描&quot;失败&quot;让我以为头部全灭。重新看内存大块（6-9MB 的 &lt;code&gt;r--p&lt;/code&gt; 匿名区）开头：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;30333500 a2809802 ef80a9d3... 07000000 78563412 ...
+ ^&quot;035\0&quot;  ^checksum ^signature  ^hdr=0x70 ^endian_tag
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;&lt;strong&gt;&lt;code&gt;035\0&lt;/code&gt; 就是 dex magic 的后 4 字节——易盾只把开头的 &lt;code&gt;dex\n&lt;/code&gt; 4 个字节抹了&lt;/strong&gt;，checksum/signature/endian_tag/map_list 全都活着！修复方法朴素到感人：前面补 4 字节 &lt;code&gt;dex\n&lt;/code&gt; 写回，就是一个完整可反编译的 dex。&lt;/p&gt;
+&lt;p&gt;四个 dex 全部这样救活，两个实现细节：&lt;/p&gt;
+&lt;ol&gt;
+&lt;li&gt;&lt;strong&gt;有的 dex 需要重算 adler32&lt;/strong&gt;（运行时内存里个别字节被改过，jadx 校验和不过，&lt;code&gt;zlib.adler32(buf[12:])&lt;/code&gt; 重写即可）；&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;jadx 吃不下 33MB 的 dex&lt;/strong&gt;（JVM 默认堆爆页面文件），用 &lt;code&gt;--decompilation-mode fallback&lt;/code&gt; + 单 dex 限 &lt;code&gt;-Xmx1400m&lt;/code&gt; 稳过。&lt;/li&gt;
+&lt;/ol&gt;
+&lt;h2&gt;5. 转机二：.so 的 .text 在运行时是裸奔的&lt;/h2&gt;
+&lt;p&gt;反编译 dex 立刻看到关键类：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;public class NativeUtil {
+    static { System.loadLibrary(&quot;appc-cv-lib&quot;); }
+    public static native String getNetSignModuleKey(Context); // RSA n
+    public static native String getNetSignExponent(Context);  // RSA e
+    public static native String getNetSignPlIV(Context);      // IV
+    public static native String getNetSignReIV(Context);      // IV
+}
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;密钥全在 native 层——这解释了之前 Java 层挖到的 7 把密钥全军覆没。而静态拆开 &lt;code&gt;libappc-cv-lib.so&lt;/code&gt;，&lt;code&gt;.text&lt;/code&gt; 段全是 &lt;code&gt;udf&lt;/code&gt; 陷阱指令：&lt;strong&gt;so 也是加密的，加载后自解密&lt;/strong&gt;。&lt;/p&gt;
+&lt;p&gt;但它加载后就住在内存里。步骤：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;# 1. 从活进程 maps 找到 so 的区段
+adb shell su -c &apos;cat /proc/&amp;lt;pid&amp;gt;/maps&apos; | grep appc-cv
+# 2. 按区段 dd 出来（skip 用十进制！shell 算术是 32 位的，0x7xxxxxxxxxxx 会溢出）
+adb shell su -c &apos;dd if=/proc/&amp;lt;pid&amp;gt;/mem bs=4096 skip=&amp;lt;十进制&amp;gt; count=&amp;lt;n&amp;gt; of=/data/local/tmp/so.bin&apos;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;capstone 反汇编导出符号，四个 JNI 函数结构一模一样：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;bl  &amp;lt;检测函数&amp;gt;
+tst w0, #0xff
+b.eq &amp;lt;System.exit 分支&amp;gt;      ← 检测命中就杀进程（frida 秒死的元凶）
+adrp x1, &amp;lt;字符串地址&amp;gt;          ← 密钥在只读数据段明文躺着
+b    NewStringUTF
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;&lt;strong&gt;加密的代码挡得住静态分析，挡不住运行时 dump&lt;/strong&gt;——反调试函数自己也引用着明文密钥常量。四个值全部到手：RSA n（309 位十进制）、e=65537、ReIV、PlIV。&lt;/p&gt;
+&lt;h2&gt;6. 算法链：反编译源里逐行抄&lt;/h2&gt;
+&lt;p&gt;拿到密钥后，加密流程在 Java 层看得一清二楚：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;1. params = 业务字段 + 基座{uid, token, jPushId, version} + timestamp + signToken
+2. signToken = MD5( SHA512hex( fastjson(TreeMap(params)) )[1::2][0::2] ).toUpperCase()
+3. dataKey  = 16 个随机 [a-zA-Z0-9]        ← 所以每次密文都不同
+4. rsaPart  = b64( RSA_PKCS1v15(n,e).encrypt(dataKey) )     ← 恒 128B/172 字符
+5. aesPart  = wrap60_b64( AES_CBC_PKCS5(json, dataKey, ReIV) )
+6. d        = wrap60_b64( (aesPart + rsaPart).encode() )    ← 双层编码的由来
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;段结构之谜同时解开：尾段恒 128B 不是&quot;第二块业务密文&quot;，是 RSA 包着的随机 AES key——教科书式混合加密。&lt;/p&gt;
+&lt;h2&gt;7. 最后三个 bug：每一都卡到怀疑人生&lt;/h2&gt;
+&lt;p&gt;自造请求连着吃了五六个 &lt;code&gt;11002&lt;/code&gt;。此时&lt;strong&gt;千万不要继续猜&lt;/strong&gt;，要设计能&quot;一锤定音&quot;的实验：&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;坑 1：signToken 是大写&lt;/strong&gt;。&lt;code&gt;Integer.toHexString&lt;/code&gt; 是小写，我照抄了。发现方式：从堆里抠出运行时明文（见下节），对比 &lt;code&gt;8A6BAEFF...&lt;/code&gt; vs 我的小写。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;坑 2：n 抄录少一位&lt;/strong&gt;。308 vs 309 位十进制，肉眼根本看不出。发现方式：&lt;strong&gt;写程序从 dump 里读原始字节比对&lt;/strong&gt;——凡是手工转录的常量，一律用脚本从源头提取。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;坑 3：表单编码&lt;/strong&gt;。App 只把空格编 &lt;code&gt;%20&lt;/code&gt;、等号编 &lt;code&gt;%3D&lt;/code&gt;，base64 里的 &lt;code&gt;+&lt;/code&gt; 和 &lt;code&gt;/&lt;/code&gt; 原样裸奔。这说明&lt;strong&gt;服务端是自定义解码器&lt;/strong&gt;（不把 &lt;code&gt;+&lt;/code&gt; 当空格），而 Python requests 默认把 &lt;code&gt;+&lt;/code&gt; 编成 &lt;code&gt;%2B&lt;/code&gt;、空格编成 &lt;code&gt;+&lt;/code&gt;——在自定义解码器眼里全是错的。发现方式：对着抓包样本的编码风格逐字符 diff。&lt;/p&gt;
+&lt;p&gt;三个坑的共同教训：&lt;strong&gt;&quot;算法对了&quot;不等于&quot;字节对了&quot;。逆向的验收单位永远是字节，不是思路。&lt;/strong&gt;&lt;/p&gt;
+&lt;h2&gt;8. 堆取证：静态分析闭环不了的，让运行时内存作证&lt;/h2&gt;
+&lt;p&gt;排障时最有杀伤力的两招，都不需要注入：&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;招 1：抠运行时明文。&lt;/strong&gt; 加密前的明文 json 只在堆里活几秒。重启 App 触发请求 → 7 秒后 dd 出 dalvik 堆（注意：Java 堆是 &lt;code&gt;[anon:dalvik-main space]&lt;/code&gt;，1GB，别像我一开始只 dump 了无名匿名区扑空）→ grep &lt;code&gt;signToken&lt;/code&gt;。运行时 json、真实字段集、signToken 大小写全在里面。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;招 2：dataKey 碰撞搜索。&lt;/strong&gt; logcat（&lt;code&gt;EncryptionUtil&lt;/code&gt; tag 在 release 包里照打）泄漏每次请求的 dataKey &lt;strong&gt;密文&lt;/strong&gt;和 AES &lt;strong&gt;密文&lt;/strong&gt;；堆里则躺着 dataKey &lt;strong&gt;明文&lt;/strong&gt;。把堆里所有 16 位字母数字窗口当候选 key，逐个解 AES 首块，看是否解出 &lt;code&gt;{&quot;jPushId&lt;/code&gt;——几百万候选几分钟跑完。找到真实 dataKey 后，本地完整复刻加密 → 与真实密文逐字节一致，&lt;strong&gt;密码学链路在不上服务器的情况下完成闭环验证&lt;/strong&gt;。&lt;/p&gt;
+&lt;h2&gt;9. 登录与写接口&lt;/h2&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;登录&lt;/strong&gt;：&lt;code&gt;pwd&lt;/code&gt; 字段是 &lt;code&gt;3DES/ECB/PKCS7&lt;/code&gt;（密钥硬编码 24 字节 ASCII）→ 大写 HEX。源码里留的测试向量 &lt;code&gt;d(&quot;111111&quot;)==&quot;C2EC8E96...&quot;&lt;/code&gt; 与当前密钥对不上——&lt;strong&gt;是旧版密钥时代的残留代码，不要信内置向量，要信逐行复刻&lt;/strong&gt;。实测一次通过。
+&lt;ul&gt;
+&lt;li&gt;坑：这个密钥 PyCryptodome 会拒绝（奇偶调整后退化成弱 3DES），Java/BC 不管；Python 侧换 &lt;code&gt;cryptography&lt;/code&gt; 库即可。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;报名&lt;/strong&gt;：&lt;code&gt;data&lt;/code&gt; 字段必须是&lt;strong&gt;数组&lt;/strong&gt;——无自定义表单时传 &lt;code&gt;&quot;[]&quot;&lt;/code&gt;，传 &lt;code&gt;&quot;&quot;&lt;/code&gt; 或 &lt;code&gt;&quot;{}&quot;&lt;/code&gt; 都报&quot;参数为空&quot;。&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;字段语义靠实测修正&lt;/strong&gt;：&lt;code&gt;status=3&lt;/code&gt; 才是&quot;报名中&quot;；&lt;code&gt;injoin&lt;/code&gt; 的真实语义是&quot;处于报名窗口内&quot;而不是&quot;我已报名&quot;。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h2&gt;10. 方法论&lt;/h2&gt;
+&lt;ol&gt;
+&lt;li&gt;&lt;strong&gt;先分层&lt;/strong&gt;：传输编码 / 密码学 / 业务字段，三层分开验证，每层都要有 byte 级验收标准。&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;反调试绕开而非对抗&lt;/strong&gt;：&lt;code&gt;/proc/pid/mem&lt;/code&gt; + &lt;code&gt;dd&lt;/code&gt; 不触发任何主流检测，root 就够了。&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;别信&quot;头被抹了&quot;的传说&lt;/strong&gt;：逐字节看内存里到底剩了什么。修复 dex 可能只需要补 4 个字节。&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;加密的 .so 在运行时是明文&lt;/strong&gt;：maps 定位区段 → dd → capstone。密钥常量往往就在只读段。&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;手工转录的常量必须脚本化提取&lt;/strong&gt;，抄错一位的 RSA 模数不会报错，只会让你怀疑人生。&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;堆 + logcat 是免费的 oracle&lt;/strong&gt;：明文、密钥、字段集都能在运行时抓到；碰撞搜索可以离线闭环验证整条密码学链。&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;用服务器的错误码做探测&lt;/strong&gt;：&lt;code&gt;参数为空&lt;/code&gt; vs &lt;code&gt;参数错误&lt;/code&gt; 的差异能定位缺的字段和格式。&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;凡结论必有证据等级&lt;/strong&gt;：猜想 &amp;lt; 源码 &amp;lt; 单次实证 &amp;lt; 逐字节一致。写文档时标清楚。&lt;/li&gt;
+&lt;/ol&gt;
+</content:encoded></item><item><title>Linux操作系统-课堂笔记 课时5</title><link>https://neecoo.dpdns.org/2026-09-linux-5/</link><guid isPermaLink="true">https://neecoo.dpdns.org/2026-09-linux-5/</guid><pubDate>Tue, 22 Sep 2026 12:28:09 GMT</pubDate><content:encoded>&lt;h1&gt;第五课时：文件系统&lt;/h1&gt;
+&lt;h2&gt;一、文件系统概述&lt;/h2&gt;
+&lt;p&gt;文件系统负责统一管理文件与存储设备：屏蔽底层设备复杂性，为系统内核提供统一的设备操作接口、存储资源调度能力与数据一致性保障，支撑上层应用与内核模块完成文件存取、权限管理、空间分配等核心功能。&lt;/p&gt;
+&lt;p&gt;Linux 常见的文件系统有 ext4、xfs、vfat 等，可用 &lt;code&gt;df -T&lt;/code&gt; 查看各分区使用的文件系统类型。&lt;/p&gt;
+&lt;p&gt;文件名最大长度由 &lt;code&gt;NAME_MAX&lt;/code&gt;（定义于 &lt;code&gt;&amp;lt;linux/limits.h&amp;gt;&lt;/code&gt;）限制，默认为 255 &lt;strong&gt;字节&lt;/strong&gt;。注意单位是字节而非字符：UTF-8 下一个汉字占 3 字节，故文件名最多约 80 余个汉字；英文字符可达 255 个。&lt;/p&gt;
+&lt;h2&gt;二、文件的类型与分类&lt;/h2&gt;
+&lt;h3&gt;按 ls -l 首字符区分的七种文件类型&lt;/h3&gt;
+&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;文件类型&lt;/th&gt;
+&lt;th&gt;&lt;code&gt;ls -l&lt;/code&gt; 首字符&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;普通文件&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;-&lt;/code&gt;&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;目录文件&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;d&lt;/code&gt;&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;链接文件&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;l&lt;/code&gt;&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;管道文件（FIFO）&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;p&lt;/code&gt;&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;字符设备文件&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;c&lt;/code&gt;&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;块设备文件&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;b&lt;/code&gt;&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;套接字文件&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;s&lt;/code&gt;&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;h3&gt;其他分类维度&lt;/h3&gt;
+&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;分类维度&lt;/th&gt;
+&lt;th&gt;类别&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;数据表示方式&lt;/td&gt;
+&lt;td&gt;ASCII 码文件、二进制文件&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;操作过程中的保护级别&lt;/td&gt;
+&lt;td&gt;只读、读写、可执行文件&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;信息流向&lt;/td&gt;
+&lt;td&gt;输入文件、输出文件、输入/输出文件&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;存在时间&lt;/td&gt;
+&lt;td&gt;临时文件、永久文件&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;关于临时文件的存放：/var 存放随系统运行不断变化的数据（日志、缓存、邮件等），其中相当部分是临时性文件；典型的系统临时文件目录是 /tmp。&lt;/p&gt;
+&lt;h2&gt;三、文件权限&lt;/h2&gt;
+&lt;h3&gt;ls -l 权限串的解读&lt;/h3&gt;
+&lt;p&gt;&lt;code&gt;ls -l&lt;/code&gt; 每行开头共 10 个字符：第 1 位是文件类型（见上表），后 9 位每 3 位一组，依次描述三类用户各自的权限：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;u&lt;/strong&gt;：文件所有者（user）&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;g&lt;/strong&gt;：同组用户（group）&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;o&lt;/strong&gt;：其他用户（others）&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;示例：&lt;code&gt;-rwxr-xr-x&lt;/code&gt; = 普通文件，所有者可读写执行，同组和其他用户可读和执行。&lt;/p&gt;
+&lt;p&gt;每组三位固定按 &lt;code&gt;rwx&lt;/code&gt; 排列，可换算为数字：r=4、w=2、x=1，故 &lt;code&gt;rwx&lt;/code&gt;=7、&lt;code&gt;r-x&lt;/code&gt;=5、&lt;code&gt;rw-&lt;/code&gt;=6。&lt;/p&gt;
+&lt;h3&gt;用户、用户组与文件的关系&lt;/h3&gt;
+&lt;p&gt;文件所有者是特定的用户；用户与用户组是&lt;strong&gt;多对多&lt;/strong&gt;关系——一个用户可加入多个组，一个组也可包含多个用户。&lt;/p&gt;
+&lt;p&gt;文件创建时，创建者默认成为所有者、其主组默认成为文件所属组；但所有者是可以修改的：&lt;code&gt;chown 用户 文件&lt;/code&gt; 修改所有者，&lt;code&gt;chgrp 组 文件&lt;/code&gt; 修改所属组（也可 &lt;code&gt;chown 用户:组 文件&lt;/code&gt; 一并修改）。&lt;/p&gt;
+&lt;h3&gt;rwx 对文件与目录的含义不同&lt;/h3&gt;
+&lt;p&gt;文件不一定有可执行权限；目录通常要有可执行权限——对目录而言，x 代表&quot;可以进入/穿越该目录&quot;，目录没有 x 就无法 &lt;code&gt;cd&lt;/code&gt; 进去，也无法访问目录内的文件（即使知道文件名）。&lt;/p&gt;
+&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;权限&lt;/th&gt;
+&lt;th&gt;对文件&lt;/th&gt;
+&lt;th&gt;对目录&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;r&lt;/td&gt;
+&lt;td&gt;可读取文件内容&lt;/td&gt;
+&lt;td&gt;可列出目录内条目（&lt;code&gt;ls&lt;/code&gt;）&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;w&lt;/td&gt;
+&lt;td&gt;可修改文件内容&lt;/td&gt;
+&lt;td&gt;可在目录内新建、删除、重命名条目&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;x&lt;/td&gt;
+&lt;td&gt;可执行（内容须是程序/脚本）&lt;/td&gt;
+&lt;td&gt;可进入目录（&lt;code&gt;cd&lt;/code&gt;）、访问目录内文件&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;h3&gt;chmod 修改权限&lt;/h3&gt;
+&lt;p&gt;文字法：&lt;code&gt;chmod [who][opt][mode] 文件&lt;/code&gt;——三段参数必须连写，中间无空格。&lt;/p&gt;
+&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;参数&lt;/th&gt;
+&lt;th&gt;取值&lt;/th&gt;
+&lt;th&gt;含义&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;who&lt;/td&gt;
+&lt;td&gt;u / g / o / a&lt;/td&gt;
+&lt;td&gt;所有者 / 同组用户 / 其他用户 / 所有用户（默认）&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;opt&lt;/td&gt;
+&lt;td&gt;+ / - / =&lt;/td&gt;
+&lt;td&gt;添加 / 取消 / 重新设定为&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;mode&lt;/td&gt;
+&lt;td&gt;r / w / x&lt;/td&gt;
+&lt;td&gt;读 / 写 / 执行&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;示例：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;chmod u+x a.sh      # 给所有者加执行权限
+chmod go-w file     # 收回同组和其他用户的写权限
+chmod a=rw file     # 所有人重设为读写
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;数字法：三位八进制数依次对应 u、g、o 的权限和：&lt;/p&gt;
+&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;权限串&lt;/th&gt;
+&lt;th&gt;数字&lt;/th&gt;
+&lt;th&gt;说明&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;rwxrwxrwx&lt;/td&gt;
+&lt;td&gt;777&lt;/td&gt;
+&lt;td&gt;全权限&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;rwxr-xr-x&lt;/td&gt;
+&lt;td&gt;755&lt;/td&gt;
+&lt;td&gt;通用权限&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;blockquote&gt;
+&lt;p&gt;⚠️ &lt;strong&gt;注意&lt;/strong&gt;：多用户系统慎用 &lt;code&gt;chmod -R 777&lt;/code&gt;——递归放开全部权限会让所有用户都能改动、执行这些文件；日常 644（普通文件）/ 755（可执行文件、目录）通常已够用。&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;h2&gt;四、文件内容操作命令&lt;/h2&gt;
+&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;命令&lt;/th&gt;
+&lt;th&gt;作用&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;wc 文件&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;统计文件的行数、单词数、字节数&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;grep 模式 文件&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;查找文件中包含指定模式的行并打印&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;&lt;code&gt;wc&lt;/code&gt; 默认依次输出&quot;行数、词数、字节数&quot;，常用选项：&lt;code&gt;-l&lt;/code&gt;（仅行数）、&lt;code&gt;-w&lt;/code&gt;（仅词数）、&lt;code&gt;-c&lt;/code&gt;（字节数）、&lt;code&gt;-m&lt;/code&gt;（字符数）。&lt;/p&gt;
+&lt;p&gt;&lt;code&gt;grep&lt;/code&gt; 常用选项：&lt;code&gt;-n&lt;/code&gt; 显示行号、&lt;code&gt;-i&lt;/code&gt; 忽略大小写、&lt;code&gt;-v&lt;/code&gt; 反向匹配（输出不包含模式的行）。&lt;/p&gt;
+&lt;h2&gt;五、Shell 命令组合：管道、命令替换、重定向&lt;/h2&gt;
+&lt;h3&gt;管道 &lt;code&gt;|&lt;/code&gt;&lt;/h3&gt;
+&lt;p&gt;用于连接多个命令，把前一个命令的输出作为后一个命令的输入：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;ls -l | wc -l       # 统计当前目录的条目数
+ps -ef | grep ssh   # 在所有进程中查找 ssh 相关进程
+&lt;/code&gt;&lt;/pre&gt;
+&lt;h3&gt;命令替换 &lt;code&gt;$(命令)&lt;/code&gt; / &lt;code&gt;`命令`&lt;/code&gt;&lt;/h3&gt;
+&lt;p&gt;把一个命令的执行结果作为字符串，嵌入到另一条命令中：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;echo &quot;今天是 $(date)&quot;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;h3&gt;wall 广播&lt;/h3&gt;
+&lt;p&gt;&lt;code&gt;wall 消息&lt;/code&gt; 向当前登录的所有用户发送广播。经典对比：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;code&gt;wall date&lt;/code&gt;：把 &quot;date&quot; 这串&lt;strong&gt;字面文本&lt;/strong&gt;广播出去，大家看到的就是单词 date；&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;wall &lt;/code&gt;date``：先执行反引号里的 date 命令，把&lt;strong&gt;当前时间&lt;/strong&gt;作为消息广播出去。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;后一个例子同时演示了命令替换的作用。&lt;/p&gt;
+&lt;h3&gt;重定向&lt;/h3&gt;
+&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;符号&lt;/th&gt;
+&lt;th&gt;含义&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;&amp;gt;&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;输出重定向（写入文件，&lt;strong&gt;覆盖&lt;/strong&gt;原内容）&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;&amp;gt;&amp;gt;&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;输出重定向（&lt;strong&gt;追加&lt;/strong&gt;到文件末尾）&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;&amp;lt;&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;输入重定向，命令从文件读取输入&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;2&amp;gt;&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;错误输出重定向&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;2&amp;gt;&amp;amp;1&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;把错误输出合并到标准输出&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;blockquote&gt;
+&lt;p&gt;⚠️ &lt;strong&gt;注意&lt;/strong&gt;：&lt;code&gt;&amp;gt;&lt;/code&gt; 会先清空目标文件再写入，&lt;code&gt;cat a &amp;gt; b&lt;/code&gt; 会把 b 的原有内容覆盖掉；想保留原内容用 &lt;code&gt;&amp;gt;&amp;gt;&lt;/code&gt;。&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;h2&gt;六、vi 编辑器&lt;/h2&gt;
+&lt;p&gt;vi 有三种模式：&lt;strong&gt;命令模式&lt;/strong&gt;（打开文件后默认）、&lt;strong&gt;编辑模式&lt;/strong&gt;（插入文本）、&lt;strong&gt;ex 模式&lt;/strong&gt;（末行模式，按 &lt;code&gt;:&lt;/code&gt; 进入）。&lt;/p&gt;
+&lt;h3&gt;模式切换&lt;/h3&gt;
+&lt;ul&gt;
+&lt;li&gt;命令模式 → 编辑模式：&lt;code&gt;i&lt;/code&gt; 在光标前插入，&lt;code&gt;a&lt;/code&gt; 在光标后插入，&lt;code&gt;o&lt;/code&gt; 在下方新建一行并插入，&lt;code&gt;O&lt;/code&gt; 在上方新建一行并插入；&lt;/li&gt;
+&lt;li&gt;编辑模式 → 命令模式：按 &lt;code&gt;Esc&lt;/code&gt;。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h3&gt;命令模式&lt;/h3&gt;
+&lt;p&gt;保存退出：&lt;code&gt;ZZ&lt;/code&gt; 保存并退出。&lt;/p&gt;
+&lt;p&gt;光标移动：&lt;/p&gt;
+&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;按键&lt;/th&gt;
+&lt;th&gt;作用&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;h&lt;/code&gt; / &lt;code&gt;j&lt;/code&gt; / &lt;code&gt;k&lt;/code&gt; / &lt;code&gt;l&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;左 / 下 / 上 / 右&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;0&lt;/code&gt; / &lt;code&gt;$&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;行首 / 行尾&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;gg&lt;/code&gt; / &lt;code&gt;G&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;文件首行 / 文件末行&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;Ctrl+f&lt;/code&gt; / &lt;code&gt;Ctrl+b&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;向下 / 向上翻页&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;删除：&lt;/p&gt;
+&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;按键&lt;/th&gt;
+&lt;th&gt;作用&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;x&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;删除光标处单个字符&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;dd&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;删除（剪切）整行，&lt;code&gt;ndd&lt;/code&gt; 删除 n 行&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;dw&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;从光标删到下一个单词开头&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;D&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;从光标删到行尾&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;复制粘贴：&lt;code&gt;yy&lt;/code&gt; 复制整行，&lt;code&gt;nyy&lt;/code&gt; 复制 n 行；&lt;code&gt;p&lt;/code&gt; 粘贴到光标下方，&lt;code&gt;P&lt;/code&gt; 粘贴到上方；&lt;code&gt;dd&lt;/code&gt; + &lt;code&gt;p&lt;/code&gt; 即剪切再粘贴。&lt;/p&gt;
+&lt;p&gt;搜索：在命令模式下直接按 &lt;code&gt;/内容&lt;/code&gt; 向下搜索、&lt;code&gt;?内容&lt;/code&gt; 向上搜索（不需要先按 &lt;code&gt;:&lt;/code&gt; 进入末行模式），&lt;code&gt;n&lt;/code&gt; 跳到下一个匹配、&lt;code&gt;N&lt;/code&gt; 跳到上一个。&lt;/p&gt;
+&lt;h3&gt;ex 模式（末行模式）&lt;/h3&gt;
+&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;命令&lt;/th&gt;
+&lt;th&gt;作用&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;:wq&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;保存并退出&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;:q&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;退出&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;:q!&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;强制退出&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;:set number&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;显示行号（&lt;code&gt;:set nonu&lt;/code&gt; 取消）&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;行号只作为显示提示存在，不属于文件真实内容——保存后文件里并没有这些行号。&lt;/p&gt;
+&lt;blockquote&gt;
+&lt;p&gt;⚠️ &lt;strong&gt;注意&lt;/strong&gt;：&lt;code&gt;:q!&lt;/code&gt; 不保存修改直接退出，本次未保存的编辑内容会&lt;strong&gt;全部丢失&lt;/strong&gt;；确认要丢弃修改时才使用。&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;h2&gt;本课重点速记&lt;/h2&gt;
+&lt;ol&gt;
+&lt;li&gt;文件名长度上限 &lt;code&gt;NAME_MAX&lt;/code&gt; = 255 &lt;strong&gt;字节&lt;/strong&gt;（UTF-8 汉字约占 80 个）。&lt;/li&gt;
+&lt;li&gt;七种文件类型：普通 &lt;code&gt;-&lt;/code&gt;、目录 &lt;code&gt;d&lt;/code&gt;、链接 &lt;code&gt;l&lt;/code&gt;、管道 &lt;code&gt;p&lt;/code&gt;、字符设备 &lt;code&gt;c&lt;/code&gt;、块设备 &lt;code&gt;b&lt;/code&gt;、套接字 &lt;code&gt;s&lt;/code&gt;。&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;ls -l&lt;/code&gt; 前 10 位 = 1 位类型 + u/g/o 各 3 位；r=4、w=2、x=1。&lt;/li&gt;
+&lt;li&gt;用户与用户组是&lt;strong&gt;多对多&lt;/strong&gt;关系；创建者只是默认所有者，可用 &lt;code&gt;chown&lt;/code&gt;/&lt;code&gt;chgrp&lt;/code&gt; 修改。&lt;/li&gt;
+&lt;li&gt;x 对目录 = 可进入；目录无 x 则无法 &lt;code&gt;cd&lt;/code&gt; 进去。&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;chmod&lt;/code&gt; 文字法三段连写（&lt;code&gt;chmod u+x f&lt;/code&gt;）；数字法 777 全权限、755 通用。&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;wc&lt;/code&gt; 统计行/词/字节，&lt;code&gt;grep&lt;/code&gt; 按模式查找行。&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;|&lt;/code&gt; 管道串联命令；&lt;code&gt;$(...)&lt;/code&gt; 与反引号是命令替换；&lt;code&gt;&amp;gt;&lt;/code&gt; 覆盖、&lt;code&gt;&amp;gt;&amp;gt;&lt;/code&gt; 追加、&lt;code&gt;2&amp;gt;&lt;/code&gt; 错误输出、&lt;code&gt;2&amp;gt;&amp;amp;1&lt;/code&gt; 合并。&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;wall $(date)&lt;/code&gt;（或 &lt;code&gt;wall &lt;/code&gt;date``）广播的是当前时间，&lt;code&gt;wall date&lt;/code&gt; 广播的是字面文本。&lt;/li&gt;
+&lt;li&gt;vi 三模式；&lt;code&gt;ZZ&lt;/code&gt;/&lt;code&gt;:wq&lt;/code&gt; 存盘退出，&lt;code&gt;:q!&lt;/code&gt; 强退丢修改；&lt;code&gt;yy&lt;/code&gt;/&lt;code&gt;p&lt;/code&gt; 复制粘贴，&lt;code&gt;dd&lt;/code&gt; 剪切行，&lt;code&gt;/&lt;/code&gt; 搜索。&lt;/li&gt;
+&lt;/ol&gt;
+</content:encoded></item><item><title>不使用代理，服务器无法直连github的解决办法</title><link>https://neecoo.dpdns.org/2026-09-github-connect/</link><guid isPermaLink="true">https://neecoo.dpdns.org/2026-09-github-connect/</guid><description>省流：改成ssh连接</description><pubDate>Tue, 22 Sep 2026 00:21:23 GMT</pubDate><content:encoded>&lt;h1&gt;现象&lt;/h1&gt;
+&lt;p&gt;服务器上 &lt;code&gt;git pull&lt;/code&gt; / &lt;code&gt;git fetch&lt;/code&gt; 对 GitHub 远程仓库报错，两种典型形态：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;fatal: unable to access &apos;https://github.com/xxx/xxx.git/&apos;:
+Failed to connect to github.com port 443 via 127.0.0.1 after 2121 ms:
+Could not connect to server
+&lt;/code&gt;&lt;/pre&gt;
+&lt;pre&gt;&lt;code&gt;error: RPC failed; curl 56 Recv failure; Connection was reset
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;诡异的地方在于：同一台机器上 &lt;code&gt;curl https://github.com&lt;/code&gt; 偶尔能返回 200，&lt;code&gt;gh api&lt;/code&gt; 命令也一切正常——网页偶尔能开、API 全通，唯独 git 的 http 传输死活不行。&lt;/p&gt;
+&lt;h1&gt;为什么 http 不行，ssh 却可以&lt;/h1&gt;
+&lt;ol&gt;
+&lt;li&gt;&lt;strong&gt;http 的阻断是选择性的&lt;/strong&gt;。对 github.com 443 端口的 https 流量，干扰设备做深度包检测（DPI），依据 TLS 握手中明文的 SNI（域名）加后续流量特征决定是否注入 TCP RST。普通网页请求有时放行，而 git 的 smart-http 交互（&lt;code&gt;GET /xxx.git/info/refs?service=git-upload-pack&lt;/code&gt; 这类长连接会话）稳定命中规则被重置——这就是 &quot;Connection was reset&quot; 的来历。&lt;code&gt;api.github.com&lt;/code&gt; 解析到另一组边缘节点，不在干扰范围内，所以 gh 命令一直通。&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;ssh 没有可供匹配的特征&lt;/strong&gt;。ssh 是二进制协议，没有 TLS 也就没有 SNI，DPI 规则匹配不到它。GitHub 官方还专门提供 &lt;code&gt;ssh.github.com:443&lt;/code&gt;（走 443 端口的 ssh），就是为受限网络准备的备用入口。&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;以前配的代理是另一条路&lt;/strong&gt;。很多教程让你配 &lt;code&gt;git config --global http.proxy&lt;/code&gt;，那是把 github 的 http 流量交给本地代理软件——代理活着时 http 也通，代理一关就成了死配置。&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;结论：把远程连接从 http 换成 ssh，一劳永逸。&lt;/p&gt;
+&lt;h1&gt;解决步骤&lt;/h1&gt;
+&lt;h2&gt;1. 生成一对专用密钥&lt;/h2&gt;
+&lt;pre&gt;&lt;code&gt;ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519_github -N &quot;&quot; -C &quot;备注名&quot;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;h2&gt;2. 把公钥加到 GitHub 账号&lt;/h2&gt;
+&lt;p&gt;打开 GitHub 网页 → Settings → SSH and GPG keys → New SSH key，粘贴：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;cat ~/.ssh/id_ed25519_github.pub
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;或者&lt;a href=&quot;https://github.com/settings/ssh/new&quot;&gt;从这里跳转&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;账号级 key 对你名下所有仓库生效（自己有写权限的仓库都能推）。&lt;/p&gt;
+&lt;h2&gt;3. 写 ssh 配置&lt;/h2&gt;
+&lt;p&gt;&lt;code&gt;~/.ssh/config&lt;/code&gt;：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;Host github.com ssh.github.com
+    IdentityFile ~/.ssh/id_ed25519_github
+    IdentitiesOnly yes
+&lt;/code&gt;&lt;/pre&gt;
+&lt;h2&gt;4. 远程地址从 http 转 ssh&lt;/h2&gt;
+&lt;pre&gt;&lt;code&gt;git remote set-url origin git@github.com:用户名/仓库名.git
+&lt;/code&gt;&lt;/pre&gt;
+&lt;h2&gt;5. 验证&lt;/h2&gt;
+&lt;pre&gt;&lt;code&gt;ssh -T git@github.com
+# Hi 用户名! You&apos;ve successfully authenticated, but GitHub does not provide shell access.
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;看到 &lt;code&gt;Hi 用户名!&lt;/code&gt; 就成了，之后 pull/push 全走 ssh。&lt;/p&gt;
+&lt;h1&gt;踩坑记录&lt;/h1&gt;
+&lt;h2&gt;坑一：残留的 URL 级死代理&lt;/h2&gt;
+&lt;p&gt;报错里那句 &lt;code&gt;via 127.0.0.1&lt;/code&gt; 说明 git 在走一个不存在的本地代理。这种配置常常是 URL 级的：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;http.https://github.com.proxy = http://127.0.0.1:9645
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;它&lt;strong&gt;只对 github.com 生效&lt;/strong&gt;，所以 &lt;code&gt;git config --get http.proxy&lt;/code&gt; 查不到、容易被忽略。正确的排查命令：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;git config --list --show-origin | grep -i proxy
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;找到后删掉：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;git config --global --unset http.https://github.com.proxy
+&lt;/code&gt;&lt;/pre&gt;
+&lt;h2&gt;坑二：22 端口被封&lt;/h2&gt;
+&lt;p&gt;&lt;code&gt;ssh -T git@github.com&lt;/code&gt; 连不上时，改走 443 端口的 ssh 备用入口：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;ssh -T -p 443 git@ssh.github.com
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;对应的 remote 地址写成：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;ssh://git@ssh.github.com:443/用户名/仓库名.git
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;&lt;code&gt;~/.ssh/config&lt;/code&gt; 里把 &lt;code&gt;ssh.github.com&lt;/code&gt; 一并写进 Host 行，两种形式都能用同一把 key。&lt;/p&gt;
+&lt;h2&gt;坑三：多用户跑 git（宝塔 www 用户）&lt;/h2&gt;
+&lt;p&gt;web 目录下的仓库往往属于 &lt;code&gt;www&lt;/code&gt; 用户，面板或 cron 以 www 身份执行 pull 时，ssh 找的是 &lt;code&gt;/home/www/.ssh&lt;/code&gt; 而不是你的家目录。需要给 www 单独放一份 key：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;sudo mkdir -p /home/www/.ssh
+sudo cp ~/.ssh/id_ed25519_github ~/.ssh/id_ed25519_github.pub /home/www/.ssh/
+printf &apos;Host github.com ssh.github.com\n    IdentityFile ~/.ssh/id_ed25519_github\n    IdentitiesOnly yes\n&apos; \
+  | sudo tee /home/www/.ssh/config &amp;gt;/dev/null
+sudo chown -R www:www /home/www/.ssh
+sudo chmod 700 /home/www/.ssh
+sudo chmod 600 /home/www/.ssh/id_ed25519_github /home/www/.ssh/config
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;手动以 www 身份操作时记得 &lt;code&gt;sudo -H -u www git ...&lt;/code&gt;，&lt;code&gt;-H&lt;/code&gt; 让 HOME 指向 &lt;code&gt;/home/www&lt;/code&gt;，否则读到的还是错误的 ssh 配置。&lt;/p&gt;
+&lt;h1&gt;验证清单&lt;/h1&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;code&gt;ssh -T git@github.com&lt;/code&gt; 返回 &lt;code&gt;Hi 用户名!&lt;/code&gt;&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;git fetch --dry-run&lt;/code&gt; 无报错&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;git config --list --show-origin | grep -i proxy&lt;/code&gt; 无残留死代理&lt;/li&gt;
+&lt;li&gt;涉及 www 用户的场景：&lt;code&gt;sudo -H -u www ssh -T git@github.com&lt;/code&gt; 同样通过&lt;/li&gt;
+&lt;/ul&gt;
+</content:encoded></item><item><title>Linux操作系统-课堂笔记 课时4</title><link>https://neecoo.dpdns.org/2026-09-linux-4/</link><guid isPermaLink="true">https://neecoo.dpdns.org/2026-09-linux-4/</guid><pubDate>Thu, 17 Sep 2026 16:36:41 GMT</pubDate><content:encoded>&lt;h1&gt;第四课时：文件操作、查找、链接与用户管理&lt;/h1&gt;
+&lt;h2&gt;1. touch 命令&lt;/h2&gt;
+&lt;p&gt;&lt;code&gt;touch&lt;/code&gt; 用于创建空文件，或修改文件的时间戳。&lt;/p&gt;
+&lt;h3&gt;1.1 基本用法&lt;/h3&gt;
+&lt;pre&gt;&lt;code&gt;touch 文件名
+&lt;/code&gt;&lt;/pre&gt;
+&lt;ul&gt;
+&lt;li&gt;如果文件不存在，默认会创建一个空文件。&lt;/li&gt;
+&lt;li&gt;如果文件已存在，默认更新文件的访问时间和修改时间。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h3&gt;1.2 常用选项&lt;/h3&gt;
+&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;选项&lt;/th&gt;
+&lt;th&gt;作用&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-a&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;只修改文件的存取时间，即 atime&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-m&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;只修改文件的修改时间，即 mtime&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-c&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;不创建文件；文件不存在时不创建&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-r ref_file&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;使用参考文件 &lt;code&gt;ref_file&lt;/code&gt; 的时间戳&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-t time&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;使用指定时间，格式为 &lt;code&gt;[[CC]YY]MMDDhhmm[.ss]&lt;/code&gt;&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-d 字符串&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;使用指定日期时间字符串&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;示例：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;touch file.txt
+touch -a file.txt
+touch -m file.txt
+touch -c nofile.txt
+touch -r ref.txt file.txt
+touch -t 202609181200 file.txt
+&lt;/code&gt;&lt;/pre&gt;
+&lt;hr /&gt;
+&lt;h2&gt;2. mv 命令&lt;/h2&gt;
+&lt;p&gt;&lt;code&gt;mv&lt;/code&gt; 用于移动文件或目录，也常用于重命名。&lt;/p&gt;
+&lt;h3&gt;2.1 基本用法&lt;/h3&gt;
+&lt;pre&gt;&lt;code&gt;mv [选项] 源文件或目录 目标文件或目录
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;示例：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;mv file1 file2          # 将 file1 重命名为 file2
+mv file1 /tmp/          # 将 file1 移动到 /tmp 目录
+mv dir1 /tmp/           # 将 dir1 移动到 /tmp 目录
+mv dir1 dir2            # 若 dir2 不存在，则重命名；若存在，则移动到 dir2 内
+&lt;/code&gt;&lt;/pre&gt;
+&lt;h3&gt;2.2 常用选项&lt;/h3&gt;
+&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;选项&lt;/th&gt;
+&lt;th&gt;作用&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-i&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;覆盖前提示确认&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-f&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;强制覆盖，不提示&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-n&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;不覆盖已存在文件&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-v&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;显示移动过程&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-u&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;仅在源文件比目标文件新，或目标不存在时移动&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;示例：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;mv -i file1 file2
+mv -f file1 /tmp/
+mv -v file1 /tmp/
+&lt;/code&gt;&lt;/pre&gt;
+&lt;hr /&gt;
+&lt;h2&gt;3. cat 命令&lt;/h2&gt;
+&lt;p&gt;&lt;code&gt;cat&lt;/code&gt; 用于查看文件内容，也可以连接多个文件并输出。&lt;/p&gt;
+&lt;h3&gt;3.1 基本用法&lt;/h3&gt;
+&lt;pre&gt;&lt;code&gt;cat 文件名
+cat 文件1 文件2
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;示例：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;cat /etc/passwd
+cat file1 file2
+&lt;/code&gt;&lt;/pre&gt;
+&lt;h3&gt;3.2 常用选项&lt;/h3&gt;
+&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;选项&lt;/th&gt;
+&lt;th&gt;作用&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-n&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;显示行号，包括空行&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-b&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;显示行号，但不包括空行&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-A&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;显示不可见字符，如制表符、换行符等&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-s&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;将连续多个空行压缩为一个空行&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;示例：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;cat -n file.txt
+cat -b file.txt
+cat -A file.txt
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;补充：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;查看大文件时，推荐使用 &lt;code&gt;less&lt;/code&gt; 或 &lt;code&gt;more&lt;/code&gt; 分页查看。&lt;/li&gt;
+&lt;li&gt;例如：&lt;/li&gt;
+&lt;/ul&gt;
+&lt;pre&gt;&lt;code&gt;less /etc/passwd
+more /etc/passwd
+&lt;/code&gt;&lt;/pre&gt;
+&lt;hr /&gt;
+&lt;h2&gt;4. vim 编辑器&lt;/h2&gt;
+&lt;p&gt;&lt;code&gt;vim&lt;/code&gt; 是 Linux 中常用的文本编辑器。&lt;/p&gt;
+&lt;h3&gt;4.1 启动与退出&lt;/h3&gt;
+&lt;pre&gt;&lt;code&gt;vim 文件名
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;常用退出命令：&lt;/p&gt;
+&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;命令&lt;/th&gt;
+&lt;th&gt;作用&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;:w&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;写入保存&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;:q&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;退出&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;:wq&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;保存并退出&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;:x&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;保存并退出&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;:q!&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;不保存，强制退出&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;h3&gt;4.2 模式与常用操作&lt;/h3&gt;
+&lt;p&gt;vim 常见模式：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;普通模式：默认模式，用于移动光标、删除、复制、粘贴等。&lt;/li&gt;
+&lt;li&gt;插入模式：用于输入文本。&lt;/li&gt;
+&lt;li&gt;末行模式：用于输入 &lt;code&gt;:&lt;/code&gt; 开头的命令，如保存、退出、替换等。&lt;/li&gt;
+&lt;li&gt;可视模式：用于选择文本块。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;进入插入模式：&lt;/p&gt;
+&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;按键&lt;/th&gt;
+&lt;th&gt;作用&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;i&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;在光标前插入&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;a&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;在光标后追加&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;o&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;在当前行下方新建一行并插入&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;O&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;在当前行上方新建一行并插入&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;保存与写入：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;:w
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;追加与插入：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;i
+a
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;说明：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;code&gt;i&lt;/code&gt; 是普通模式下进入插入模式，不是在末行模式输入 &lt;code&gt;:i&lt;/code&gt;。&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;a&lt;/code&gt; 是普通模式下进入追加插入模式，不是在末行模式输入 &lt;code&gt;:a&lt;/code&gt;。&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;:w&lt;/code&gt; 是末行模式下的写入保存命令。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;其他常用末行命令：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;:set nu        &quot; 显示行号
+:set nonu      &quot; 取消行号
+:%s/old/new/g  &quot; 全文替换
+&lt;/code&gt;&lt;/pre&gt;
+&lt;hr /&gt;
+&lt;h2&gt;5. 分屏显示&lt;/h2&gt;
+&lt;p&gt;Windows 中可使用：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;dir /p
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;Linux 中不使用 &lt;code&gt;dir /p&lt;/code&gt;，对应分屏显示方式为：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;ls | more
+ls | less
+more 文件名
+less 文件名
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;示例：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;ls | less
+cat /etc/passwd | more
+less /var/log/messages
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;说明：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;code&gt;more&lt;/code&gt; 只能向前翻页。&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;less&lt;/code&gt; 可以前后翻页，功能更强。&lt;/li&gt;
+&lt;li&gt;管道符 &lt;code&gt;|&lt;/code&gt; 用于将前一个命令的输出作为后一个命令的输入。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;hr /&gt;
+&lt;h2&gt;6. head 与 tail 命令&lt;/h2&gt;
+&lt;h3&gt;6.1 head&lt;/h3&gt;
+&lt;p&gt;&lt;code&gt;head&lt;/code&gt; 用于显示文件开头内容，默认显示前 10 行。&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;head 文件名
+head -n 20 文件名
+head -c 100 文件名
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;示例：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;head /etc/passwd
+head -n 5 /etc/passwd
+&lt;/code&gt;&lt;/pre&gt;
+&lt;h3&gt;6.2 tail&lt;/h3&gt;
+&lt;p&gt;&lt;code&gt;tail&lt;/code&gt; 用于显示文件末尾内容，默认显示后 10 行。&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;tail 文件名
+tail -n 20 文件名
+tail -f 文件名
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;示例：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;tail /etc/passwd
+tail -n 5 /etc/passwd
+tail -f /var/log/messages
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;说明：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;code&gt;-n&lt;/code&gt; 指定显示行数。&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;-f&lt;/code&gt; 持续跟踪文件新增内容，常用于查看日志。&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;-F&lt;/code&gt; 与 &lt;code&gt;-f&lt;/code&gt; 类似，但文件被轮转后仍能继续跟踪。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;hr /&gt;
+&lt;h2&gt;7. find 命令&lt;/h2&gt;
+&lt;p&gt;&lt;code&gt;find&lt;/code&gt; 用于查找文件和目录，默认输出文件路径，不显示文件内容。&lt;/p&gt;
+&lt;h3&gt;7.1 基本语法&lt;/h3&gt;
+&lt;pre&gt;&lt;code&gt;find pathname -options [-print -exec -ok ...]
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;说明：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;code&gt;pathname&lt;/code&gt;：find 命令所查找的目录路径。&lt;/li&gt;
+&lt;li&gt;如果没写路径，默认在当前目录下查找。&lt;/li&gt;
+&lt;li&gt;推荐从根目录 &lt;code&gt;/&lt;/code&gt; 开始查找，但全盘查找速度较慢。&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;-print&lt;/code&gt;：输出查找到的路径，通常是默认动作。&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;-exec&lt;/code&gt;：对查找到的文件执行命令。&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;-ok&lt;/code&gt;：与 &lt;code&gt;-exec&lt;/code&gt; 类似，但执行前会提示确认。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h3&gt;7.2 常用选项&lt;/h3&gt;
+&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;选项&lt;/th&gt;
+&lt;th&gt;作用&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-name&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;按文件名查找&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-iname&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;按文件名查找，忽略大小写&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-type&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;按文件类型查找，如 &lt;code&gt;f&lt;/code&gt; 普通文件、&lt;code&gt;d&lt;/code&gt; 目录、&lt;code&gt;l&lt;/code&gt; 符号链接&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-perm&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;按权限查找&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-size&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;按文件大小查找&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-mtime&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;按修改时间查找&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-user&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;按所有者查找&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-group&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;按所属组查找&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-print&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;输出路径&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-exec&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;对结果执行命令&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-ok&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;对结果执行命令前提示确认&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;示例：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;find / -name &quot;*.conf&quot;
+find /home -type f -name &quot;*.txt&quot;
+find / -type d -name &quot;test&quot;
+find / -perm 644
+find / -size +100M
+find / -user tom
+find / -name &quot;*.log&quot; -exec ls -l {} \;
+find / -name &quot;*.tmp&quot; -ok rm {} \;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;h3&gt;7.3 通配符&lt;/h3&gt;
+&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;通配符&lt;/th&gt;
+&lt;th&gt;含义&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;*&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;匹配任意多个字符&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;?&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;匹配任意单个字符&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;示例：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;find / -name &quot;*.conf&quot;
+find / -name &quot;file?.txt&quot;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;注意：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;使用通配符时通常要加引号，避免被 shell 提前展开。&lt;/li&gt;
+&lt;li&gt;例如应写：&lt;/li&gt;
+&lt;/ul&gt;
+&lt;pre&gt;&lt;code&gt;find / -name &quot;*.conf&quot;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;而不是随意写：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;find / -name *.conf
+&lt;/code&gt;&lt;/pre&gt;
+&lt;h3&gt;7.4 管道符&lt;/h3&gt;
+&lt;p&gt;管道符 &lt;code&gt;|&lt;/code&gt; 用于将前一个命令的输出作为后一个命令的输入。&lt;/p&gt;
+&lt;p&gt;示例：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;find / -name &quot;*.conf&quot; | less
+ps aux | grep ssh
+rpm -qa | grep foo
+&lt;/code&gt;&lt;/pre&gt;
+&lt;hr /&gt;
+&lt;h2&gt;8. ln 命令：链接&lt;/h2&gt;
+&lt;p&gt;&lt;code&gt;ln&lt;/code&gt; 用于创建链接文件。链接文件可以与源文件内容同步。&lt;/p&gt;
+&lt;h3&gt;8.1 硬链接&lt;/h3&gt;
+&lt;p&gt;默认情况下，&lt;code&gt;ln&lt;/code&gt; 创建的是硬链接。&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;ln 源文件 硬链接名
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;特点：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;硬链接与源文件指向同一个 inode。&lt;/li&gt;
+&lt;li&gt;链接文件与源文件产生的关联即硬链接。&lt;/li&gt;
+&lt;li&gt;删除源文件后，硬链接仍然保留文件内容。&lt;/li&gt;
+&lt;li&gt;文件内容不会因为删除源文件而立即消失，直到所有硬链接都被删除。&lt;/li&gt;
+&lt;li&gt;硬链接不能跨文件系统。&lt;/li&gt;
+&lt;li&gt;通常不能为目录创建硬链接。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;示例：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;ln file.txt hard.txt
+ls -li file.txt hard.txt
+&lt;/code&gt;&lt;/pre&gt;
+&lt;h3&gt;8.2 软链接&lt;/h3&gt;
+&lt;p&gt;软链接相当于指针，也叫符号链接。&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;ln -s 源文件 软链接名
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;特点：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;软链接是一个独立文件，指向目标路径。&lt;/li&gt;
+&lt;li&gt;可以跨文件系统。&lt;/li&gt;
+&lt;li&gt;可以为目录创建软链接。&lt;/li&gt;
+&lt;li&gt;如果源文件被删除，软链接会变成断链。&lt;/li&gt;
+&lt;li&gt;使用 &lt;code&gt;ls -l&lt;/code&gt; 查看时，软链接通常显示为 &lt;code&gt;链接名 -&amp;gt; 目标路径&lt;/code&gt;。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;示例：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;ln -s /home/tom/file.txt soft.txt
+ls -l soft.txt
+&lt;/code&gt;&lt;/pre&gt;
+&lt;h3&gt;8.3 硬链接与软链接对比&lt;/h3&gt;
+&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;类型&lt;/th&gt;
+&lt;th&gt;命令&lt;/th&gt;
+&lt;th&gt;特点&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;硬链接&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;ln 源 目标&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;同一 inode，不能跨文件系统，通常不能链接目录&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;软链接&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;ln -s 源 目标&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;类似快捷方式，可跨文件系统，可链接目录，源删除后断链&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;hr /&gt;
+&lt;h2&gt;9. 用户与用户组管理&lt;/h2&gt;
+&lt;h3&gt;9.1 用户分类&lt;/h3&gt;
+&lt;p&gt;Linux 中常见三类用户：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;root 用户：超级用户，UID 为 &lt;code&gt;0&lt;/code&gt;。&lt;/li&gt;
+&lt;li&gt;系统用户：用于运行系统服务，UID 通常为 &lt;code&gt;1~999&lt;/code&gt;，旧系统中常为 &lt;code&gt;1~499&lt;/code&gt;。&lt;/li&gt;
+&lt;li&gt;普通用户：供登录使用，UID 通常从 &lt;code&gt;1000&lt;/code&gt; 开始，旧系统中常从 &lt;code&gt;500&lt;/code&gt; 开始。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;说明：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;所有用户 ID 均从 500 开始是不准确的。&lt;/li&gt;
+&lt;li&gt;正确规则是：
+&lt;ul&gt;
+&lt;li&gt;root 的 UID 是 &lt;code&gt;0&lt;/code&gt;。&lt;/li&gt;
+&lt;li&gt;系统用户 UID 通常为 &lt;code&gt;1~999&lt;/code&gt;。&lt;/li&gt;
+&lt;li&gt;普通用户 UID 通常从 &lt;code&gt;1000&lt;/code&gt; 开始，并按创建时间先后顺序累加。&lt;/li&gt;
+&lt;li&gt;旧版系统中普通用户可能从 &lt;code&gt;500&lt;/code&gt; 开始。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h3&gt;9.2 useradd：添加用户&lt;/h3&gt;
+&lt;pre&gt;&lt;code&gt;useradd 用户名
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;特点：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;创建用户时通常会自动创建同名宿主目录。&lt;/li&gt;
+&lt;li&gt;默认创建出来的是普通用户。&lt;/li&gt;
+&lt;li&gt;宿主目录通常在 &lt;code&gt;/home/用户名&lt;/code&gt;。&lt;/li&gt;
+&lt;li&gt;是否自动创建宿主目录受 &lt;code&gt;/etc/login.defs&lt;/code&gt; 等配置影响。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;常用选项：&lt;/p&gt;
+&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;选项&lt;/th&gt;
+&lt;th&gt;作用&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-m&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;创建宿主目录&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-M&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;不创建宿主目录&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-d 目录&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;指定宿主目录&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-g 组名&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;指定主工作组&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-G 组名&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;指定附加组&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-u UID&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;指定用户 ID&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-s shell&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;指定登录 shell&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;示例：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;useradd tom
+useradd -m tom
+useradd -d /home/tom -m tom
+useradd -g users tom
+&lt;/code&gt;&lt;/pre&gt;
+&lt;h3&gt;9.3 passwd：设置密码&lt;/h3&gt;
+&lt;p&gt;&lt;code&gt;passwd&lt;/code&gt; 用于创建或修改用户密码。&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;passwd 用户名
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;示例：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;passwd tom
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;说明：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;root 用户可以给其他用户设置密码。&lt;/li&gt;
+&lt;li&gt;普通用户直接执行 &lt;code&gt;passwd&lt;/code&gt; 可以修改自己的密码。&lt;/li&gt;
+&lt;li&gt;密码并不是存放在 &lt;code&gt;/etc/passwd&lt;/code&gt; 中。&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;/etc/passwd&lt;/code&gt; 存放用户账户信息，不存放密码。&lt;/li&gt;
+&lt;li&gt;密码实际存放在 &lt;code&gt;/etc/shadow&lt;/code&gt; 中。&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;/etc/passwd&lt;/code&gt; 每行常见字段：&lt;/li&gt;
+&lt;/ul&gt;
+&lt;pre&gt;&lt;code&gt;用户名:密码占位符:UID:GID:描述:宿主目录:登录Shell
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;示例：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;tom:x:1001:1001::/home/tom:/bin/bash
+&lt;/code&gt;&lt;/pre&gt;
+&lt;h3&gt;9.4 用户与工作组&lt;/h3&gt;
+&lt;ul&gt;
+&lt;li&gt;Linux 的每个用户都要隶属于一个工作组。&lt;/li&gt;
+&lt;li&gt;每个用户有一个主工作组，还可以属于多个附加工作组。&lt;/li&gt;
+&lt;li&gt;注册用户通常有默认工作组，默认组名常与用户名相同。&lt;/li&gt;
+&lt;li&gt;但组 ID 不一定与用户 ID 相同，可以手动指定。&lt;/li&gt;
+&lt;li&gt;查看用户信息：&lt;/li&gt;
+&lt;/ul&gt;
+&lt;pre&gt;&lt;code&gt;id 用户名
+groups 用户名
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;示例：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;id tom
+groups tom
+&lt;/code&gt;&lt;/pre&gt;
+&lt;h3&gt;9.5 groupadd：添加用户组&lt;/h3&gt;
+&lt;pre&gt;&lt;code&gt;groupadd 组名
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;示例：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;groupadd dev
+&lt;/code&gt;&lt;/pre&gt;
+&lt;h3&gt;9.6 将用户添加到工作组&lt;/h3&gt;
+&lt;p&gt;创建用户时指定主组：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;useradd -g 组名 用户名
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;将已有用户加入附加组：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;usermod -aG 组名 用户名
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;示例：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;useradd -g dev tom
+usermod -aG dev tom
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;说明：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;code&gt;-g&lt;/code&gt; 指定主工作组。&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;-G&lt;/code&gt; 指定附加工作组。&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;-aG&lt;/code&gt; 表示追加到附加组，不删除原有附加组。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h3&gt;9.7 usermod：修改用户组&lt;/h3&gt;
+&lt;p&gt;常用方式：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;usermod -g 新主组 用户名
+usermod -aG 附加组 用户名
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;示例：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;usermod -g dev tom
+usermod -aG test tom
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;&lt;code&gt;usermod&lt;/code&gt; 还可以修改：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;用户宿主目录&lt;/li&gt;
+&lt;li&gt;登录名&lt;/li&gt;
+&lt;li&gt;UID&lt;/li&gt;
+&lt;li&gt;登录 shell&lt;/li&gt;
+&lt;li&gt;用户组等&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h3&gt;9.8 userdel：删除用户&lt;/h3&gt;
+&lt;pre&gt;&lt;code&gt;userdel 用户名
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;示例：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;userdel tom
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;说明：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;默认情况下，&lt;code&gt;userdel&lt;/code&gt; 只删除用户账户。&lt;/li&gt;
+&lt;li&gt;删除用户时，宿主目录不会自动清除。&lt;/li&gt;
+&lt;li&gt;如果要同时删除宿主目录和邮件池，使用：&lt;/li&gt;
+&lt;/ul&gt;
+&lt;pre&gt;&lt;code&gt;userdel -r 用户名
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;示例：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;userdel -r tom
+&lt;/code&gt;&lt;/pre&gt;
+&lt;hr /&gt;
+</content:encoded></item><item><title>Linux操作系统-课堂笔记 课时1-3</title><link>https://neecoo.dpdns.org/2026-09-linux/</link><guid isPermaLink="true">https://neecoo.dpdns.org/2026-09-linux/</guid><pubDate>Thu, 10 Sep 2026 14:31:40 GMT</pubDate><content:encoded>&lt;h1&gt;课时1：Unix、设备接口与命名&lt;/h1&gt;
+&lt;h2&gt;1. Unix 的地位&lt;/h2&gt;
+&lt;ul&gt;
+&lt;li&gt;Unix 是第一个现代操作系统。&lt;/li&gt;
+&lt;li&gt;【补充】Linux 是类 Unix 操作系统，继承了 Unix 的多用户、多任务、一切皆文件等设计思想。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h2&gt;2. 设备命名：IDE 与非 IDE&lt;/h2&gt;
+&lt;ul&gt;
+&lt;li&gt;IDE 接口设备：HD 设备，也就是 IDE 硬盘。&lt;/li&gt;
+&lt;li&gt;非 IDE 接口设备：SD 设备，例如外接设备、SCSI 硬盘。&lt;/li&gt;
+&lt;li&gt;【补充】这些设备文件通常放在 &lt;code&gt;/dev&lt;/code&gt; 目录下，例如 &lt;code&gt;/dev/hda&lt;/code&gt;、&lt;code&gt;/dev/sda&lt;/code&gt;。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h3&gt;IDE 设备命名&lt;/h3&gt;
+&lt;p&gt;IDE 设备下面按接口名区分：&lt;/p&gt;
+&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;IDE 接口&lt;/th&gt;
+&lt;th&gt;位置&lt;/th&gt;
+&lt;th&gt;设备名&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;IDE0&lt;/td&gt;
+&lt;td&gt;master&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;hda&lt;/code&gt;&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;IDE0&lt;/td&gt;
+&lt;td&gt;slave&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;hdb&lt;/code&gt;&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;IDE1&lt;/td&gt;
+&lt;td&gt;master&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;hdc&lt;/code&gt;&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;IDE1&lt;/td&gt;
+&lt;td&gt;slave&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;hdd&lt;/code&gt;&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;h3&gt;非 IDE 接口命名&lt;/h3&gt;
+&lt;ul&gt;
+&lt;li&gt;非 IDE 接口命名：&lt;code&gt;sdX&lt;/code&gt;&lt;/li&gt;
+&lt;li&gt;例如：&lt;code&gt;sda&lt;/code&gt;、&lt;code&gt;sdb&lt;/code&gt;、&lt;code&gt;sdc&lt;/code&gt; 等。&lt;/li&gt;
+&lt;li&gt;【补充】&lt;code&gt;sdX&lt;/code&gt; 中的 &lt;code&gt;X&lt;/code&gt; 表示第几块设备，后面还可以加数字表示分区，如 &lt;code&gt;sda1&lt;/code&gt;、&lt;code&gt;sda2&lt;/code&gt;。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h2&gt;3. Linux 设备命名规则&lt;/h2&gt;
+&lt;ul&gt;
+&lt;li&gt;Linux 对设备命名只看设备接在哪个接口。&lt;/li&gt;
+&lt;li&gt;【补充】传统命名规则下，IDE 硬盘常用 &lt;code&gt;hd&lt;/code&gt;，SCSI、SATA、USB 等设备常用 &lt;code&gt;sd&lt;/code&gt;。设备文件化管理也是 Linux 的重要特点。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;hr /&gt;
+&lt;h1&gt;课时2：设备文件、挂载、目录与分区&lt;/h1&gt;
+&lt;h2&gt;1. 设备文件化管理&lt;/h2&gt;
+&lt;ul&gt;
+&lt;li&gt;Linux 将设备进行文件化管理。&lt;/li&gt;
+&lt;li&gt;【补充】设备在 Linux 中通常表现为 &lt;code&gt;/dev&lt;/code&gt; 下的设备文件，可以像文件一样被访问和操作。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h2&gt;2. mount 挂载命令&lt;/h2&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;code&gt;mount&lt;/code&gt; 是挂载命令。&lt;/li&gt;
+&lt;li&gt;用法：&lt;/li&gt;
+&lt;/ul&gt;
+&lt;pre&gt;&lt;code&gt;mount 设备 挂载点
+&lt;/code&gt;&lt;/pre&gt;
+&lt;ul&gt;
+&lt;li&gt;默认挂载在根目录。&lt;/li&gt;
+&lt;li&gt;【补充】根文件系统通常挂载在 &lt;code&gt;/&lt;/code&gt;；其他设备一般挂载到 &lt;code&gt;/mnt&lt;/code&gt;、&lt;code&gt;/media&lt;/code&gt; 等目录。挂载点必须是一个已经存在的目录。&lt;/li&gt;
+&lt;li&gt;【补充】卸载命令是：&lt;/li&gt;
+&lt;/ul&gt;
+&lt;pre&gt;&lt;code&gt;umount 挂载点
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;示例：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;mount /dev/sdb1 /mnt
+umount /mnt
+&lt;/code&gt;&lt;/pre&gt;
+&lt;h2&gt;3. Shell 提示符&lt;/h2&gt;
+&lt;ul&gt;
+&lt;li&gt;提示符形式：&lt;code&gt;用户名@计算机名 $当前目录&lt;/code&gt;&lt;/li&gt;
+&lt;li&gt;当当前用户和当前目录重名时，会显示 &lt;code&gt;~&lt;/code&gt; 符号。&lt;/li&gt;
+&lt;li&gt;【更准确说法】当当前目录就是该用户的宿主目录时，提示符中会显示 &lt;code&gt;~&lt;/code&gt;。宿主目录通常与用户名同名，例如用户 &lt;code&gt;tom&lt;/code&gt; 的宿主目录通常是 &lt;code&gt;/home/tom&lt;/code&gt;。&lt;/li&gt;
+&lt;li&gt;【补充】普通用户提示符常以 &lt;code&gt;$&lt;/code&gt; 结尾，root 用户常以 &lt;code&gt;#&lt;/code&gt; 结尾。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;示例：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;tom@linux:~$
+root@linux:/root#
+&lt;/code&gt;&lt;/pre&gt;
+&lt;h2&gt;4. su 命令&lt;/h2&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;code&gt;su&lt;/code&gt; 命令：switch user，用于切换用户。&lt;/li&gt;
+&lt;li&gt;【补充】常用方式：&lt;/li&gt;
+&lt;/ul&gt;
+&lt;pre&gt;&lt;code&gt;su 用户名
+su - 用户名
+&lt;/code&gt;&lt;/pre&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;code&gt;su - 用户名&lt;/code&gt; 会同时切换用户环境，例如宿主目录、环境变量等。&lt;/li&gt;
+&lt;li&gt;从普通用户切换到 root，通常需要输入 root 密码。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h2&gt;5. 宿主目录&lt;/h2&gt;
+&lt;ul&gt;
+&lt;li&gt;宿主目录：与用户名同名的目录。&lt;/li&gt;
+&lt;li&gt;【补充】普通用户的宿主目录通常在 &lt;code&gt;/home/用户名&lt;/code&gt;，例如 &lt;code&gt;/home/tom&lt;/code&gt;。&lt;/li&gt;
+&lt;li&gt;root 用户的宿主目录是 &lt;code&gt;/root&lt;/code&gt;。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h2&gt;6. 根目录常见目录说明&lt;/h2&gt;
+&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;目录&lt;/th&gt;
+&lt;th&gt;原始笔记说明&lt;/th&gt;
+&lt;th&gt;补充说明&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;/bin&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;二进制目录&lt;/td&gt;
+&lt;td&gt;存放基本用户命令，如 &lt;code&gt;ls&lt;/code&gt;、&lt;code&gt;cp&lt;/code&gt; 等&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;/dev&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;设备目录&lt;/td&gt;
+&lt;td&gt;存放设备文件&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;/home&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;所有用户宿主目录的父目录&lt;/td&gt;
+&lt;td&gt;普通用户家目录通常在这里&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;/lost+found&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;回收站&lt;/td&gt;
+&lt;td&gt;更准确说：文件系统修复后找回的孤立文件存放处，不是普通回收站&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;/mnt&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;挂载点目录&lt;/td&gt;
+&lt;td&gt;常用于临时挂载外部设备或文件系统&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;/sbin&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;系统二进制&lt;/td&gt;
+&lt;td&gt;存放系统管理命令&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;/tmp&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;临时目录&lt;/td&gt;
+&lt;td&gt;存放临时文件，可能重启后清空&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;/var&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;临时目录&lt;/td&gt;
+&lt;td&gt;存放可变数据，如日志、缓存、队列等&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;/boot&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;系统引导文件目录&lt;/td&gt;
+&lt;td&gt;存放内核、引导程序等&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;/etc&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;等价 Windows system32 目录；系统级服务/应用存放目录&lt;/td&gt;
+&lt;td&gt;更准确：主要存放系统和服务配置文件&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;/media&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;光驱；只有在 XII 下才自动挂载&lt;/td&gt;
+&lt;td&gt;XII 是图形用户界面；通常指 X11/X Window。可移动媒体常自动挂载到这里&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;/root&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;超级用户目录&lt;/td&gt;
+&lt;td&gt;root 用户的家目录&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;/selinux&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;系统防火墙&lt;/td&gt;
+&lt;td&gt;更准确：SELinux 是安全增强模块，不是传统防火墙&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;/sys&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;系统目录&lt;/td&gt;
+&lt;td&gt;sysfs，提供内核和设备信息&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;/usr&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;等价 Windows program 目录；应用文件安装目录&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;/usr&lt;/code&gt; 存放用户级程序、库和资源&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;h2&gt;7. 分区&lt;/h2&gt;
+&lt;h3&gt;分区类型&lt;/h3&gt;
+&lt;ul&gt;
+&lt;li&gt;主分区&lt;/li&gt;
+&lt;li&gt;扩展分区&lt;/li&gt;
+&lt;li&gt;逻辑分区&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h3&gt;分区规则&lt;/h3&gt;
+&lt;ul&gt;
+&lt;li&gt;主分区 + 扩展分区个数 &lt;code&gt;≤ 4&lt;/code&gt;。&lt;/li&gt;
+&lt;li&gt;主分区至少有一个。&lt;/li&gt;
+&lt;li&gt;扩展分区可以没有。&lt;/li&gt;
+&lt;li&gt;逻辑分区的编号必须从 &lt;code&gt;5&lt;/code&gt; 开始。&lt;/li&gt;
+&lt;li&gt;【补充】扩展分区不能直接像主分区那样使用，它主要用于容纳逻辑分区。逻辑分区建立在扩展分区内部。&lt;/li&gt;
+&lt;li&gt;【补充】在 MBR 分区表中，常见设备分区编号为：&lt;code&gt;1~4&lt;/code&gt; 给主分区或扩展分区，&lt;code&gt;5&lt;/code&gt; 开始给逻辑分区。例如 &lt;code&gt;/dev/sda1&lt;/code&gt;、&lt;code&gt;/dev/sda5&lt;/code&gt;。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;hr /&gt;
+&lt;h1&gt;第三课时：RPM 包管理、ls 命令与文件目录操作&lt;/h1&gt;
+&lt;h2&gt;1. RPM 包管理&lt;/h2&gt;
+&lt;h3&gt;1.1 RPM 概念&lt;/h3&gt;
+&lt;ul&gt;
+&lt;li&gt;RPM：Red Hat Package Manager，红帽包管理器。&lt;/li&gt;
+&lt;li&gt;RPM 是 Red Hat 系列 Linux 中常用的软件包管理方式，如 RHEL、CentOS、Fedora。&lt;/li&gt;
+&lt;li&gt;RPM 包文件通常以 &lt;code&gt;.rpm&lt;/code&gt; 结尾。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;示例：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;foo-1.0-i386.rpm
+&lt;/code&gt;&lt;/pre&gt;
+&lt;h3&gt;1.2 RPM 包命名与架构&lt;/h3&gt;
+&lt;p&gt;RPM 包名常见格式：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;软件名-版本号-发布号.架构.rpm
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;示例：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;foo-1.0-1.i386.rpm
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;常见架构：&lt;/p&gt;
+&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;架构&lt;/th&gt;
+&lt;th&gt;含义&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;i386&lt;/code&gt;、&lt;code&gt;i586&lt;/code&gt;、&lt;code&gt;i686&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;32 位 x86 架构&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;x86_64&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;64 位 x86 架构&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;noarch&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;与硬件架构无关&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;aarch64&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;64 位 ARM 架构&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;所以：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;code&gt;foo-1.0-i386.rpm&lt;/code&gt; 是 32 位软件包。&lt;/li&gt;
+&lt;li&gt;64 位软件包通常表示为 &lt;code&gt;x86_64&lt;/code&gt;，不是 &lt;code&gt;i586&lt;/code&gt;。&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;i586&lt;/code&gt; 仍属于 32 位 x86 架构。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h3&gt;1.3 RPM 常用操作&lt;/h3&gt;
+&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;操作&lt;/th&gt;
+&lt;th&gt;命令&lt;/th&gt;
+&lt;th&gt;说明&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;安装&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;rpm -ivh 包名.rpm&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;-i&lt;/code&gt; 安装，&lt;code&gt;-v&lt;/code&gt; 显示详细过程，&lt;code&gt;-h&lt;/code&gt; 显示进度&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;更新/升级&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;rpm -Uvh 包名.rpm&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;-U&lt;/code&gt; 升级，若未安装通常会安装&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;仅升级已安装包&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;rpm -Fvh 包名.rpm&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;只升级已经安装的软件包&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;查询已安装包&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;rpm -q 软件包名&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;查询某个包是否安装&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;查询所有已安装包&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;rpm -qa&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;列出所有已安装 RPM 包&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;查询包内文件&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;rpm -ql 软件包名&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;列出该包安装的文件&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;查询包信息&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;rpm -qi 软件包名&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;显示软件包详细信息&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;查询文件属于哪个包&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;rpm -qf 文件路径&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;查看文件由哪个 RPM 包提供&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;查询未安装的 RPM 文件&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;rpm -qp 包名.rpm&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;查询 RPM 文件本身信息&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;卸载&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;rpm -e 软件包名&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;删除已安装的 RPM 包&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;验证&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;rpm -V 软件包名&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;校验已安装包文件是否被修改&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;示例：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;rpm -ivh foo-1.0-1.i386.rpm
+rpm -Uvh foo-1.0-1.i386.rpm
+rpm -q foo
+rpm -qa | grep foo
+rpm -ql foo
+rpm -qi foo
+rpm -e foo
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;补充：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;RPM 安装时不会自动解决依赖关系。&lt;/li&gt;
+&lt;li&gt;如果缺少依赖，通常使用 &lt;code&gt;yum&lt;/code&gt; 或 &lt;code&gt;dnf&lt;/code&gt; 安装，它们可以自动处理依赖。&lt;/li&gt;
+&lt;li&gt;例如：&lt;/li&gt;
+&lt;/ul&gt;
+&lt;pre&gt;&lt;code&gt;yum install ./foo-1.0-1.i386.rpm
+dnf install ./foo-1.0-1.i386.rpm
+&lt;/code&gt;&lt;/pre&gt;
+&lt;hr /&gt;
+&lt;h2&gt;2. ls 命令&lt;/h2&gt;
+&lt;p&gt;&lt;code&gt;ls&lt;/code&gt; 用于列出目录内容。&lt;/p&gt;
+&lt;h3&gt;2.1 常用选项&lt;/h3&gt;
+&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;选项&lt;/th&gt;
+&lt;th&gt;作用&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-a&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;显示所有文件和子目录，包括以 &lt;code&gt;.&lt;/code&gt; 开头的隐藏文件&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-l&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;长格式显示文件权限、所有者、文件大小、修改时间等&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-r&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;反向排序&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-t&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;按修改时间排序，新的在前&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-tr&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;按修改时间反向排序，旧的在前&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-A&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;同 &lt;code&gt;-a&lt;/code&gt;，但不显示 &lt;code&gt;.&lt;/code&gt; 和 &lt;code&gt;..&lt;/code&gt;&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-R&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;递归展示全部子目录内容&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-h&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;与 &lt;code&gt;-l&lt;/code&gt; 合用，以人类可读方式显示大小，如 &lt;code&gt;K&lt;/code&gt;、&lt;code&gt;M&lt;/code&gt;、&lt;code&gt;G&lt;/code&gt;&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-d&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;显示目录本身，而不是目录内容&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-i&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;显示 inode 号&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-S&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;按文件大小排序&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;--color=auto&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;不同文件类型用不同颜色显示&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;说明：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;code&gt;ll&lt;/code&gt; 通常是 &lt;code&gt;ls -l&lt;/code&gt; 的别名，不是独立命令。&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;ls -r&lt;/code&gt; 表示反向排序。&lt;/li&gt;
+&lt;li&gt;按修改时间排序使用 &lt;code&gt;ls -t&lt;/code&gt;。&lt;/li&gt;
+&lt;li&gt;按修改时间反向排序使用 &lt;code&gt;ls -tr&lt;/code&gt;。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h3&gt;2.2 常用示例&lt;/h3&gt;
+&lt;pre&gt;&lt;code&gt;ls
+ls -a
+ls -l
+ls -A
+ls -R
+ls -lt
+ls -ltr
+ls -lh
+ls -ld /home
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;示例说明：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;ls -a       # 显示所有文件，包括隐藏文件
+ls -l       # 长格式显示
+ls -A       # 显示隐藏文件，但不显示 . 和 ..
+ls -R       # 递归显示所有子目录
+ls -lt      # 按修改时间排序，新的在前
+ls -ltr     # 按修改时间反向排序，旧的在前
+ls -lh      # 长格式并以人类可读方式显示大小
+ls -ld dir  # 显示目录本身信息
+&lt;/code&gt;&lt;/pre&gt;
+&lt;hr /&gt;
+&lt;h2&gt;3. 绝对路径与相对路径&lt;/h2&gt;
+&lt;h3&gt;3.1 绝对路径&lt;/h3&gt;
+&lt;ul&gt;
+&lt;li&gt;从根目录 &lt;code&gt;/&lt;/code&gt; 开始写起的路径。&lt;/li&gt;
+&lt;li&gt;例如：&lt;/li&gt;
+&lt;/ul&gt;
+&lt;pre&gt;&lt;code&gt;/home/tom/test.txt
+/etc/passwd
+/var/log/messages
+&lt;/code&gt;&lt;/pre&gt;
+&lt;h3&gt;3.2 相对路径&lt;/h3&gt;
+&lt;ul&gt;
+&lt;li&gt;从当前目录开始写起的路径。&lt;/li&gt;
+&lt;li&gt;例如：&lt;/li&gt;
+&lt;/ul&gt;
+&lt;pre&gt;&lt;code&gt;test.txt
+./test.txt
+../tom/test.txt
+&lt;/code&gt;&lt;/pre&gt;
+&lt;h3&gt;3.3 特殊路径符号&lt;/h3&gt;
+&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;符号&lt;/th&gt;
+&lt;th&gt;含义&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;.&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;当前目录&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;..&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;上一级目录&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;~&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;当前用户的宿主目录&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;~user&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;指定用户的宿主目录&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;上一个工作目录，常用于 &lt;code&gt;cd -&lt;/code&gt;&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;示例：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;cd /home/tom
+cd ..
+cd ~
+cd -
+&lt;/code&gt;&lt;/pre&gt;
+&lt;hr /&gt;
+&lt;h2&gt;4. 目录与文件操作命令&lt;/h2&gt;
+&lt;h3&gt;4.1 mkdir：创建文件夹&lt;/h3&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;code&gt;mkdir&lt;/code&gt; 用于创建目录。&lt;/li&gt;
+&lt;li&gt;常用选项：&lt;/li&gt;
+&lt;/ul&gt;
+&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;选项&lt;/th&gt;
+&lt;th&gt;作用&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-p&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;递归创建目录，父目录不存在时一并创建&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-m&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;创建目录时直接设置权限&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;示例：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;mkdir test
+mkdir -p /home/tom/a/b/c
+mkdir -m 755 testdir
+&lt;/code&gt;&lt;/pre&gt;
+&lt;h3&gt;4.2 rmdir：删除文件夹&lt;/h3&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;code&gt;rmdir&lt;/code&gt; 用于删除空目录。&lt;/li&gt;
+&lt;li&gt;只能删除空目录。&lt;/li&gt;
+&lt;li&gt;如果目录非空，会报错。&lt;/li&gt;
+&lt;li&gt;常用选项：&lt;/li&gt;
+&lt;/ul&gt;
+&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;选项&lt;/th&gt;
+&lt;th&gt;作用&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-p&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;递归删除空目录链&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;示例：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;rmdir test
+rmdir -p a/b/c
+&lt;/code&gt;&lt;/pre&gt;
+&lt;h3&gt;4.3 rm：删除文件或目录&lt;/h3&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;code&gt;rm&lt;/code&gt; 用于删除文件或目录。&lt;/li&gt;
+&lt;li&gt;默认不能删除目录，删除目录需要加 &lt;code&gt;-r&lt;/code&gt; 或 &lt;code&gt;-d&lt;/code&gt;。&lt;/li&gt;
+&lt;li&gt;常用选项：&lt;/li&gt;
+&lt;/ul&gt;
+&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;选项&lt;/th&gt;
+&lt;th&gt;作用&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-r&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;递归删除目录及其内容&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-f&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;强制删除，不提示&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-i&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;删除前提示确认&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-d&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;删除空目录&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;-v&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;显示删除过程&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;示例：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;rm file.txt
+rm -i file.txt
+rm -r dir
+rm -rf dir
+rm -d emptydir
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;注意：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;code&gt;rm -rf&lt;/code&gt; 非常危险，使用时必须确认路径。&lt;/li&gt;
+&lt;li&gt;不要随意执行类似 &lt;code&gt;rm -rf /&lt;/code&gt; 的命令。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;hr /&gt;
+</content:encoded></item><item><title>支付宝小程序源码提取实录：从模拟器到完整源码</title><link>https://neecoo.dpdns.org/2026-09-alipay-mini-program-get/</link><guid isPermaLink="true">https://neecoo.dpdns.org/2026-09-alipay-mini-program-get/</guid><pubDate>Sat, 05 Sep 2026 10:07:50 GMT</pubDate><content:encoded>&lt;h1&gt;支付宝小程序源码提取实录：从模拟器到完整源码&lt;/h1&gt;
+&lt;blockquote&gt;
+&lt;p&gt;本文记录一种从零开始提取支付宝小程序离线包并解出源码的完整流程。整体思路：&lt;strong&gt;在模拟器中打开目标小程序 → 从支付宝本地数据库中找到该小程序的离线包 CDN 地址 → 直接下载官方离线包 → 解包得到源码&lt;/strong&gt;。&lt;/p&gt;
+&lt;p&gt;全程不需要逆向 so、不需要解密，因为支付宝小程序的离线包在官方 CDN 上是公开可下载的，真正难的只是「知道去哪里找这个地址」。&lt;/p&gt;
+&lt;p&gt;仅供学习研究，请勿用于任何侵权用途。&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;h2&gt;一、原理说明&lt;/h2&gt;
+&lt;p&gt;支付宝小程序（包括 H5 离线应用）在客户端内由几套容器管理：&lt;/p&gt;
+&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;存储/数据库&lt;/th&gt;
+&lt;th&gt;作用&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;files/nebulaInstallApps/&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;老版 Nebula 容器的离线包目录，存放基础库、公共资源包（明文 tar）&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;databases/nebula_app.db&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;Nebula 容器的应用注册表&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;databases/nebulax_app.db&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;Nebula 容器新版注册表（含资源表和插件表）&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;databases/xriver_app.db&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;&lt;strong&gt;xriver 容器（当前小程序主力容器）的应用注册表，业务小程序的信息基本都在这里&lt;/strong&gt;&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;关键点：&lt;/p&gt;
+&lt;ol&gt;
+&lt;li&gt;业务小程序的离线包本体在本地是加密缓存的（&lt;code&gt;files/Sandbox/B_xxx/database/ccdn/&lt;/code&gt; 下的 &lt;code&gt;.dc&lt;/code&gt;/&lt;code&gt;.mf&lt;/code&gt; 文件），直接解密很麻烦；&lt;/li&gt;
+&lt;li&gt;但注册表数据库 &lt;code&gt;xriver_app.db&lt;/code&gt; 是&lt;strong&gt;标准未加密 SQLite&lt;/strong&gt;，里面的 &lt;code&gt;nebulax_resource_app_table&lt;/code&gt; 表记录了每个小程序的 &lt;code&gt;package_url&lt;/code&gt; —— 即官方 CDN 上的离线包下载地址（形如 &lt;code&gt;https://mdn.alipayobjects.com/ccdn/...&lt;/code&gt;）；&lt;/li&gt;
+&lt;li&gt;该 CDN 地址可以直接用 HTTP GET 下载，下载得到的文件是一个 &lt;strong&gt;ZIP&lt;/strong&gt;，内部包含明文的 &lt;code&gt;&amp;lt;appId&amp;gt;.tar&lt;/code&gt;，解包即为源码。&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;所以流程简化为：&lt;strong&gt;root 模拟器 → 拷出 xriver_app.db → 查库拿 package_url → 下载 → 两层解包&lt;/strong&gt;。&lt;/p&gt;
+&lt;h2&gt;二、环境与工具&lt;/h2&gt;
+&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;工具&lt;/th&gt;
+&lt;th&gt;说明&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;MuMu 模拟器 12（Android 12）&lt;/td&gt;
+&lt;td&gt;任意&lt;strong&gt;带 root&lt;/strong&gt; 的 Android 模拟器均可（MuMu 默认开放 root）&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;MuMu 自带 adb&lt;/td&gt;
+&lt;td&gt;路径：&lt;code&gt;&amp;lt;MuMu安装目录&amp;gt;\nx_main\adb.exe&lt;/code&gt;，其他模拟器请替换为自己目录下的 adb&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;支付宝 App&lt;/td&gt;
+&lt;td&gt;模拟器内安装并&lt;strong&gt;登录&lt;/strong&gt;（不登录打不开小程序）&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;Python 3&lt;/td&gt;
+&lt;td&gt;标准库即可（&lt;code&gt;sqlite3&lt;/code&gt;、&lt;code&gt;tarfile&lt;/code&gt;），无需额外安装第三方包&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;PowerShell / curl&lt;/td&gt;
+&lt;td&gt;用于下载离线包&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;h2&gt;三、完整流程&lt;/h2&gt;
+&lt;h3&gt;步骤 1：在模拟器中打开目标小程序&lt;/h3&gt;
+&lt;p&gt;在模拟器的支付宝里搜索并打开目标小程序，随便点几个页面，停留几秒钟。&lt;/p&gt;
+&lt;p&gt;目的：让客户端向服务端请求该小程序的元信息并写入本地数据库 &lt;code&gt;xriver_app.db&lt;/code&gt;。离线包本体此时可能只下载了加密缓存，无所谓——我们要的只是数据库里的 CDN 地址。&lt;/p&gt;
+&lt;h3&gt;步骤 2：adb 连接模拟器并确认 root&lt;/h3&gt;
+&lt;pre&gt;&lt;code&gt;# 替换为你自己的 adb 路径（MuMu 自带 adb 在 &amp;lt;MuMu安装目录&amp;gt;\nx_main\adb.exe）
+$adb = &quot;&amp;lt;adb路径&amp;gt;&quot;
+
+# 看设备是否已连接
+&amp;amp; $adb devices
+# 输出的第一列即设备 serial（单开模拟器通常为 emulator-5554）：
+# emulator-5554          device product:... model:...
+
+# 后续命令统一用这个变量指定设备
+$dev = &quot;&amp;lt;设备serial&amp;gt;&quot;
+
+# 确认 root 可用（MuMu 默认有 su）
+&amp;amp; $adb -s $dev shell &quot;su -c id&quot;
+# 输出应包含 uid=0(root)
+&lt;/code&gt;&lt;/pre&gt;
+&lt;h3&gt;步骤 3：拷出支付宝的小程序注册表数据库&lt;/h3&gt;
+&lt;p&gt;&lt;code&gt;/data/data/&lt;/code&gt; 属于应用私有目录，adb shell 用户无权直接读取，需要通过 &lt;code&gt;su&lt;/code&gt; 先复制到 &lt;code&gt;/data/local/tmp/&lt;/code&gt;：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;# 把几个相关数据库都拷出来（核心是 xriver_app.db）
+&amp;amp; $adb -s $dev shell &apos;su -c &quot;cp /data/data/com.eg.android.AlipayGphone/databases/xriver_app.db /data/local/tmp/x.db; cp /data/data/com.eg.android.AlipayGphone/databases/nebulax_app.db /data/local/tmp/nx.db; cp /data/data/com.eg.android.AlipayGphone/databases/nebula_app.db /data/local/tmp/n.db; chmod 644 /data/local/tmp/*.db&quot;&apos;
+
+# 拉取到 Windows 本地
+&amp;amp; $adb -s $dev pull /data/local/tmp/x.db .\x.db
+&amp;amp; $adb -s $dev pull /data/local/tmp/nx.db .\nx.db
+&amp;amp; $adb -s $dev pull /data/local/tmp/n.db .\n.db
+&lt;/code&gt;&lt;/pre&gt;
+&lt;h3&gt;步骤 4：查询数据库，拿到目标小程序的 CDN 离线包地址&lt;/h3&gt;
+&lt;p&gt;&lt;code&gt;xriver_app.db&lt;/code&gt; 中的两张核心表：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;code&gt;nebulax_resource_app_table&lt;/code&gt; —— 所有已知晓的小程序资源信息（&lt;code&gt;app_id&lt;/code&gt;、&lt;code&gt;name&lt;/code&gt;、&lt;code&gt;version&lt;/code&gt;、&lt;code&gt;package_url&lt;/code&gt;、&lt;code&gt;main_url&lt;/code&gt; 等）&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;nebulax_app_install_table&lt;/code&gt; —— 已安装记录（按 &lt;code&gt;updateAppTime&lt;/code&gt; 排序，最近打开的小程序会排在最前，即使 &lt;code&gt;installedPath&lt;/code&gt; 为空也说明刚被访问过）&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;用 Python 标准库查询（把 &lt;code&gt;&amp;lt;目标小程序名关键词&amp;gt;&lt;/code&gt; 替换成实际名称的片段，保存为 &lt;code&gt;find_app.py&lt;/code&gt;）：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;import sqlite3
+
+con = sqlite3.connect(&quot;x.db&quot;)
+cur = con.cursor()
+
+# 方法一：按最近使用时间排序，刚打开的小程序会排在最前
+for r in cur.execute(&quot;&quot;&quot;
+    SELECT a.app_id, a.name, a.version, a.package_url
+    FROM nebulax_resource_app_table a
+    JOIN nebulax_app_install_table i ON a.app_id = i.appId
+    ORDER BY CAST(i.updateAppTime AS INTEGER) DESC
+    LIMIT 10
+&quot;&quot;&quot;):
+    print(r)
+
+# 方法二：按名称模糊搜索目标小程序
+keyword = &quot;&amp;lt;目标小程序名关键词&amp;gt;&quot;
+for r in cur.execute(&quot;&quot;&quot;
+    SELECT app_id, name, version, package_url
+    FROM nebulax_resource_app_table
+    WHERE name LIKE ?
+&quot;&quot;&quot;, (f&quot;%{keyword}%&quot;,)):
+    print(r)
+
+con.close()
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;运行：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;python .\find_app.py
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;输出形如：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;(&apos;&amp;lt;appId&amp;gt;&apos;, &apos;&amp;lt;小程序名&amp;gt;&apos;, &apos;&amp;lt;version&amp;gt;&apos;, &apos;https://mdn.alipayobjects.com/ccdn/uri/file/as/1/&amp;lt;appId&amp;gt;/1/mp/&amp;lt;开发者版本&amp;gt;.&amp;lt;时间戳&amp;gt;&apos;)
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;记下 &lt;code&gt;package_url&lt;/code&gt;。同一条记录里还有几个有用字段：&lt;/p&gt;
+&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;字段&lt;/th&gt;
+&lt;th&gt;含义&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;package_url&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;离线包完整包下载地址（本文用的就是它）&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;fallback_base_url&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;兜底资源目录（图片等静态资源可从这里直接抓）&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;main_url&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;入口页面，如 &lt;code&gt;/index.html#pages/index/index&lt;/code&gt;&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;size&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;解压后大致体积&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;extend_info&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;启动参数、组件声明等 JSON&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;plugins&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;依赖的插件列表（每个插件有自己的 appId，同样方式可提取）&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;h3&gt;步骤 5：下载离线包&lt;/h3&gt;
+&lt;p&gt;直接 GET 下载 &lt;code&gt;package_url&lt;/code&gt;。建议带上浏览器或支付宝 UA（部分 CDN 可能校验）：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;$url = &quot;&amp;lt;package_url&amp;gt;&quot;   # 上一步查到的离线包地址
+
+# PowerShell
+Invoke-WebRequest -Uri $url -OutFile .\pkg.bin `
+  -UserAgent &quot;Mozilla/5.0 (Linux; Android 12) Mobile Safari/537.36 AlipayClient&quot;
+
+# 或 curl
+curl -L -o pkg.bin -A &quot;Mozilla/5.0 (Linux; Android 12) AlipayClient&quot; $url
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;检查文件头判断格式：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;$bytes = [System.IO.File]::ReadAllBytes(&quot;.\pkg.bin&quot;)[0..15]
+($bytes | ForEach-Object { $_.ToString(&quot;X2&quot;) }) -join &quot; &quot;
+# 50 4B 03 04 ... → PK.. 即 ZIP 格式
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;支付宝离线包的外层是一个 ZIP，内含 4 个文件：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;&amp;lt;appId&amp;gt;.tar             ← 小程序源码归档（明文 tar）
+CERT.json              ← 证书
+Manifest.xml           ← 包信息（appId、名称、版本）
+SIGN.json              ← 签名
+&lt;/code&gt;&lt;/pre&gt;
+&lt;h3&gt;步骤 6：两层解包&lt;/h3&gt;
+&lt;p&gt;&lt;strong&gt;第一层：ZIP → tar&lt;/strong&gt;&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;Copy-Item .\pkg.bin .\pkg.zip
+Expand-Archive -Path .\pkg.zip -DestinationPath .\unzip -Force
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;可先看一眼 &lt;code&gt;Manifest.xml&lt;/code&gt; 确认没拿错包：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;Get-Content .\unzip\Manifest.xml
+# &amp;lt;package&amp;gt;
+#   &amp;lt;uid&amp;gt;&amp;lt;appId&amp;gt;&amp;lt;/uid&amp;gt;
+#   &amp;lt;name&amp;gt;&amp;lt;小程序名&amp;gt;&amp;lt;/name&amp;gt;
+#   ...
+# &amp;lt;/package&amp;gt;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;&lt;strong&gt;第二层：tar → 源码&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;Windows 10+ 自带 bsdtar，直接：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;mkdir .\source
+tar -xf &quot;.\unzip\&amp;lt;appId&amp;gt;.tar&quot; -C .\source
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;或用 Python（&lt;code&gt;untar.py&lt;/code&gt;）：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;import tarfile
+
+with tarfile.open(r&quot;.\unzip\&amp;lt;appId&amp;gt;.tar&quot;, &quot;r:&quot;) as tf:
+    tf.extractall(r&quot;.\source&quot;)
+&lt;/code&gt;&lt;/pre&gt;
+&lt;blockquote&gt;
+&lt;p&gt;tar 中的第一个条目名为 &lt;code&gt;_fileList&lt;/code&gt;，是支付宝自记录的文件清单，属正常现象。&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;h3&gt;步骤 7：查看产物&lt;/h3&gt;
+&lt;p&gt;解包后即得到小程序的完整编译产物：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;source/
+├── appConfig.json        # 页面路由、窗口样式等配置（对应 app.json 编译产物）
+├── index.html            # 入口 HTML
+├── index.js              # 主包 JS（webpack 打包，明文可读）
+├── index.worker.js       # worker 层逻辑（通常最大，业务逻辑大头）
+├── splitchunk~N/index.js # 分包/拆分 chunk（数量不定）
+├── manifest.json         # 应用元信息
+├── meta.json
+└── static/               # 全部图片资源（png/jpg/webp）
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;验证 &lt;code&gt;index.js&lt;/code&gt; 开头是 &lt;code&gt;/*!&lt;/code&gt; 注释 + 标准 webpack bundle 结构，说明是&lt;strong&gt;未加密的明文 JS&lt;/strong&gt;——变量名经过压缩，但全部业务逻辑、页面路径、接口调用都完整可读，配合 &lt;code&gt;appConfig.json&lt;/code&gt; 里的页面列表即可通读整个小程序。&lt;/p&gt;
+&lt;h2&gt;四、常见问题&lt;/h2&gt;
+&lt;p&gt;&lt;strong&gt;Q：为什么 &lt;code&gt;nebulaInstallApps&lt;/code&gt; 目录下找不到业务小程序的包？&lt;/strong&gt;
+新版支付宝业务小程序走 xriver 容器，本地只落加密缓存；&lt;code&gt;nebulaInstallApps&lt;/code&gt; 里能直接看到的 tar 多为基础库/公共资源包（小程序基础库、H5 公共资源等）。业务包走本文的数据库 → CDN 路线。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Q：没有 root 的模拟器行不行？&lt;/strong&gt;
+不行，读取 &lt;code&gt;/data/data/&lt;/code&gt; 必须要 root。MuMu、雷电等主流模拟器默认提供 root。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Q：下载 CDN 包必须带 UA 吗？&lt;/strong&gt;
+实测带支付宝 UA 一定可行；裸 UA 可能也被允许，建议保留以防 CDN 策略校验。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Q：想提取小程序依赖的插件怎么办？&lt;/strong&gt;
+&lt;code&gt;nebulax_resource_app_table.plugins&lt;/code&gt; 字段是 JSON 数组，里面有每个插件的 appId；插件的下载地址在 &lt;code&gt;nebulax_resource_plugin_table&lt;/code&gt; 表的 &lt;code&gt;packageUrl&lt;/code&gt; / &lt;code&gt;newPackageUrl&lt;/code&gt; 字段，同样直接下载解包即可。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Q：拿到的 JS 是压缩混淆过的，能还原成工程结构吗？&lt;/strong&gt;
+可以进一步处理：用 prettier/js-beautify 格式化，再按 webpack 模块切分（&lt;code&gt;&amp;lt;moduleId&amp;gt;:function(e){...}&lt;/code&gt; 这类模块边界），可还原出接近源码的模块化结构，工作量视包大小而定。&lt;/p&gt;
+&lt;h2&gt;五、流程总结&lt;/h2&gt;
+&lt;pre&gt;&lt;code&gt;模拟器登录支付宝 → 打开目标小程序
+        ↓
+adb + su 拷出 databases/xriver_app.db
+        ↓
+sqlite 查 nebulax_resource_app_table → package_url
+        ↓
+HTTP GET 下载（ZIP）
+        ↓
+解压 ZIP → &amp;lt;appId&amp;gt;.tar（明文）
+        ↓
+解包 tar → index.js / appConfig.json / static/ ... = 小程序源码
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;全程核心命令不过 5 条：&lt;code&gt;adb shell su -c cp&lt;/code&gt;、&lt;code&gt;adb pull&lt;/code&gt;、一条 SQL、一次 HTTP 下载、两次解包。&lt;/p&gt;
+&lt;hr /&gt;
+&lt;p&gt;&lt;em&gt;声明：本文仅用于技术学习与研究，小程序源码版权归原开发者所有，请勿用于抄袭、二次分发或其他侵权用途。&lt;/em&gt;&lt;/p&gt;
+</content:encoded></item><item><title>使用宝塔从头搭建青龙面板</title><link>https://neecoo.dpdns.org/2026-09-qinglong/</link><guid isPermaLink="true">https://neecoo.dpdns.org/2026-09-qinglong/</guid><pubDate>Fri, 04 Sep 2026 17:18:48 GMT</pubDate><content:encoded>&lt;h2&gt;安装&lt;/h2&gt;
+&lt;p&gt;使用宝塔面板的docker管理器安装是极其方便的，只需要在 &lt;code&gt;docker&lt;/code&gt; 页的应用商店直接搜索 &lt;code&gt;青龙面板&lt;/code&gt; ，然后安装即可。可以更改自己知道含义的配置，否则保持默认即可&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;./0904-54c15cf3.png&quot; alt=&quot;0904-54c15cf3.png&quot; /&gt;&lt;/p&gt;
+&lt;p&gt;安装完成后，根据自己选择的端口号，直接用服务器的 &amp;lt;ip&amp;gt;:&amp;lt;端口号&amp;gt; 即可访问到青龙面板&lt;/p&gt;
+&lt;p&gt;成功访问之后，就是初始化的引导界面，根据引导填写 通知（底下有跳过）-&amp;gt; 设置账密 即可&lt;/p&gt;
+&lt;h2&gt;使用&lt;/h2&gt;
+&lt;h3&gt;导入脚本&lt;/h3&gt;
+&lt;p&gt;这是一个自动运行脚本的工具，所以你首先要准备脚本，这里默认你已经有自己的脚本（比如自动签到，或者需要定时执行的小任务）。此时需要将其导入到 &lt;code&gt;脚本管理&lt;/code&gt; 中&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;./0904-2ae266a4.png&quot; alt=&quot;0904-2ae266a4.png&quot; /&gt;&lt;/p&gt;
+&lt;p&gt;这里是用来存放脚本的源码文件的，通过右上角的“+”号进行添加&lt;/p&gt;
+&lt;p&gt;添加好的文件，在右上角进行保存，然后是 &lt;strong&gt;调试&lt;/strong&gt;，这点很重要，在保存后，右上角有调试按钮，调试是为了保证脚本能够正常的执行，通过调试查看运行结果，没有问题后，代表这一阶段完成&lt;/p&gt;
+&lt;p&gt;tips：可能遇到没有依赖的问题，跳转到&lt;/p&gt;
+&lt;h3&gt;创建定时计划&lt;/h3&gt;
+&lt;p&gt;找到 &lt;code&gt;定时任务&lt;/code&gt; ，右上角创建任务&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;./0905-0f4e3bb7.png&quot; alt=&quot;0905-0f4e3bb7.png&quot; /&gt;&lt;/p&gt;
+&lt;p&gt;名称随便写，用于辨识&lt;/p&gt;
+&lt;p&gt;命令/脚本 指的是相对于&lt;code&gt;脚本管理&lt;/code&gt;里的位置，比如 python test.py 或者 test.py，前者的目的是接受指定参数&lt;/p&gt;
+&lt;p&gt;定时规则 就是用空格分开时间，比如 每周四早上八点一分两秒 将数字按照 秒 分 时 天 月 周 写成 2 1 8 * * 4&lt;/p&gt;
+&lt;h3&gt;至此完成了定时脚本的创建&lt;/h3&gt;
+&lt;h2&gt;遇到的一些问题&lt;/h2&gt;
+&lt;h3&gt;如果从在配置容器时，没有勾选&lt;code&gt;允许外部访问&lt;/code&gt; ,怎么改成可以被外部访问&lt;/h3&gt;
+&lt;p&gt;如果是在宝塔的docker的应用商店下载的青龙面板，就会有一个 &lt;code&gt;容器编排&lt;/code&gt; 页面，里面可以更改配置。而负责管理访问接口的配置，就藏在 .env 里&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;./0904-4459d465.png&quot; alt=&quot;0904-4459d465.png&quot; /&gt;&lt;/p&gt;
+&lt;p&gt;这个配置是管理对外暴露的host的写法&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;127.0.0.1 -&amp;gt; 外网无法访问&lt;/li&gt;
+&lt;li&gt;0.0.0.1 -&amp;gt; 外网可以访问
+当然这是建立在开放了防火墙的基础上&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h3&gt;调试脚本发现缺少依赖&lt;/h3&gt;
+&lt;p&gt;当调试的时候出现“缺少依赖”的报错，比如：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;./0905-c2003ebd.png&quot; alt=&quot;0905-c2003ebd.png&quot; /&gt;&lt;/p&gt;
+&lt;p&gt;这就需要安装依赖。退出当前页，左侧找到&lt;code&gt;依赖管理&lt;/code&gt;，点击右上角&lt;code&gt;创建依赖&lt;/code&gt;（注意选择自己需要的环境下安装依赖）&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;./0905-ac44d1ee.png&quot; alt=&quot;0905-ac44d1ee.png&quot; /&gt;&lt;/p&gt;
+&lt;p&gt;这里的名称比较容易误导，其实就是&lt;code&gt;依赖组件名称&lt;/code&gt;&lt;/p&gt;
+&lt;p&gt;如果安装失败，查看日志详情&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;./0905-88c7e63c.png&quot; alt=&quot;0905-88c7e63c.png&quot; /&gt;&lt;/p&gt;
+&lt;p&gt;最可能的情况是遇到网络问题，这个时候就需要设置镜像源&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;./0905-6a5d73a5.png&quot; alt=&quot;0905-6a5d73a5.png&quot; /&gt;&lt;/p&gt;
+&lt;p&gt;设置正确的源后，就可以重新安装依赖了。&lt;/p&gt;
+&lt;p&gt;国内可用源：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;清华大学镜像源: https://pypi.tuna.tsinghua.edu.cn/simple&lt;/li&gt;
+&lt;li&gt;阿里云镜像源: https://mirrors.aliyun.com/pypi/simple/&lt;/li&gt;
+&lt;li&gt;中国科学技术大学镜像源: https://pypi.mirrors.ustc.edu.cn/simple/&lt;/li&gt;
+&lt;li&gt;腾讯云镜像源: https://mirrors.cloud.tencent.com/pypi/simple/&lt;/li&gt;
+&lt;li&gt;华为云镜像源: https://repo.huaweicloud.com/repository/pypi/simple/&lt;/li&gt;
+&lt;/ul&gt;
+</content:encoded></item><item><title>Shirone从零打通博客自动发布链路：跨仓库构建与部署的踩坑实录</title><link>https://neecoo.dpdns.org/2026-09-post/</link><guid isPermaLink="true">https://neecoo.dpdns.org/2026-09-post/</guid><description>用可视化写作工具发文 → 内容仓推送 → 主题仓自动构建 → 服务器自动拉取部署，全程无人工干预。</description><pubDate>Fri, 04 Sep 2026 06:29:46 GMT</pubDate><content:encoded>&lt;h1&gt;从零打通博客自动发布链路：跨仓库构建与部署的踩坑实录&lt;/h1&gt;
+&lt;blockquote&gt;
+&lt;p&gt;目标：用可视化写作工具发文 → 内容仓推送 → 主题仓自动构建 → 服务器自动拉取部署，全程无人工干预。
+实际用时：一天。其中真正&quot;通&quot;的时间不到一半，剩下全在填坑。
+这篇文章先完整讲清整条链路的搭建步骤（可照抄实践），再复盘我们趟过的每一个坑——有些是上游模板自带的 bug，有些是我的低级失误，有些是冷知识。希望你能少走弯路。&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;h2&gt;一、架构总览&lt;/h2&gt;
+&lt;p&gt;整个系统由四个部分组成：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;flowchart LR
+    A[&quot;admin 写作工具&quot;] --&amp;gt;|&quot;Contents API&quot;| B[&quot;blog-content 内容仓&quot;]
+    B --&amp;gt;|&quot;repository_dispatch&quot;| C[&quot;Shirone 主题仓&quot;]
+    C --&amp;gt;|&quot;build + 推 deploy 分支&quot;| D[&quot;服务器（nginx + git）&quot;]
+&lt;/code&gt;&lt;/pre&gt;
+&lt;ol&gt;
+&lt;li&gt;&lt;strong&gt;admin（自研写作工具）&lt;/strong&gt;：浏览器表单化写文章/动态，通过 GitHub Contents API 直接提交到内容仓。零构建，Node 单文件起服务。&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;内容仓（私有）&lt;/strong&gt;：只放 Markdown、图片、配置。push 后由 Actions 做内容校验，再向主题仓发 &lt;code&gt;repository_dispatch&lt;/code&gt;。&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;主题仓（公开）&lt;/strong&gt;：收到派发信号后 checkout 内容仓 → 构建静态站 → 把 &lt;code&gt;dist/&lt;/code&gt; 以孤儿提交强推到 &lt;code&gt;deploy&lt;/code&gt; 分支 → webhook 通知服务器。&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;服务器&lt;/strong&gt;：admin 收到 webhook（HMAC 验签）后，在服务器上对稀疏克隆的仓库执行 &lt;code&gt;git fetch --depth 1 &amp;amp;&amp;amp; git reset --hard&lt;/code&gt;，nginx root 指向 &lt;code&gt;dist/&lt;/code&gt; 不变。&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;为什么选&quot;deploy 分支&quot;而不是 rsync / artifact 下载？三个理由：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;服务器端退化成最普通的 &lt;code&gt;git pull&lt;/code&gt;，不需要 SSH 私钥、不需要 API 调用；&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;天然带版本历史&lt;/strong&gt;，回滚就是 &lt;code&gt;git reset&lt;/code&gt; 到旧提交，秒级；&lt;/li&gt;
+&lt;li&gt;每次都是孤儿提交（无历史父节点），分支体积不会累积膨胀。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h2&gt;二、完整搭建流程&lt;/h2&gt;
+&lt;p&gt;按顺序做完这五步，链路即通。每一步都给出关键配置，坑的细节留到第三章。&lt;/p&gt;
+&lt;h3&gt;第 1 步：准备仓库与令牌&lt;/h3&gt;
+&lt;p&gt;三个仓库各司其职：&lt;/p&gt;
+&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;仓库&lt;/th&gt;
+&lt;th&gt;可见性&lt;/th&gt;
+&lt;th&gt;职责&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;主题仓（Shirone）&lt;/td&gt;
+&lt;td&gt;公开&lt;/td&gt;
+&lt;td&gt;主题代码 + 构建流水线 + &lt;code&gt;deploy&lt;/code&gt; 产物分支&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;内容仓（blog-content）&lt;/td&gt;
+&lt;td&gt;私有&lt;/td&gt;
+&lt;td&gt;Markdown 文章/动态、图片、站点配置&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;admin 工具仓&lt;/td&gt;
+&lt;td&gt;私有&lt;/td&gt;
+&lt;td&gt;写作工具源码，部署在服务器上&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;&lt;strong&gt;令牌&lt;/strong&gt;：只需一枚 Fine-grained PAT——Repository access 同时勾选主题仓和内容仓，Permissions 给 &lt;code&gt;Contents: Read and write&lt;/code&gt;。简单场景不必拆成多枚最小权限 token，但务必设置过期时间。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;随机密钥&lt;/strong&gt;：服务器上 &lt;code&gt;openssl rand -hex 32&lt;/code&gt; 生成一枚，后续两处填同一个值（webhook 验签用）。&lt;/p&gt;
+&lt;h3&gt;第 2 步：内容仓——触发工作流&lt;/h3&gt;
+&lt;p&gt;&lt;code&gt;.github/workflows/trigger-build.yml&lt;/code&gt;（注意 &lt;code&gt;repository:&lt;/code&gt; 要改成你自己的主题仓）：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;name: Trigger Theme Build
+
+on:
+  push:
+    branches: [main]
+    paths:                      # 只有内容真正变化才触发，改 README 不算
+      - &quot;content/**&quot;
+      - &quot;config/**&quot;
+      - &quot;data/**&quot;
+      - &quot;assets/**&quot;
+      - &quot;public/**&quot;
+  workflow_dispatch: {}
+
+concurrency:                    # 高频推送时自动取消旧的，只保留最新一次
+  group: trigger-build
+  cancel-in-progress: true
+
+jobs:
+  validate:                     # 先校验：内容格式错误在源头拦截
+    uses: YOUR_NAME/YOUR_THEME/.github/workflows/content-validate.yml@main
+    with:
+      theme_repository: YOUR_NAME/YOUR_THEME
+
+  dispatch:                     # 校验通过再派发，携带本次 SHA 供主题仓精准取版
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch build event
+        env:
+          HAS_TOKEN: ${{ secrets.DISPATCH_TOKEN != &apos;&apos; }}
+        if: env.HAS_TOKEN == &apos;true&apos;
+        uses: peter-evans/repository-dispatch@v4
+        with:
+          token: ${{ secrets.DISPATCH_TOKEN }}
+          repository: YOUR_NAME/YOUR_THEME
+          event-type: content-updated
+          client-payload: &apos;{&quot;sha&quot;: &quot;${{ github.sha }}&quot;}&apos;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;内容仓 Secrets 配置：&lt;code&gt;DISPATCH_TOKEN&lt;/code&gt; = 你的 PAT。&lt;/p&gt;
+&lt;h3&gt;第 3 步：主题仓——构建与推送产物&lt;/h3&gt;
+&lt;p&gt;&lt;code&gt;.github/workflows/deploy.yml&lt;/code&gt; 骨架（省略缓存等优化，完整版见主题仓）：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;name: Deploy
+
+on:
+  push:
+    branches: [main]
+  repository_dispatch:          # 响应内容仓的派发
+    types: [content-updated]
+  workflow_dispatch: {}         # 手动触发，回滚/首次部署用
+
+concurrency:
+  group: deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      CONTENT_DIR: .content-src
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout content  # 按派发携带的 SHA 精准拉取内容仓
+        uses: actions/checkout@v4
+        with:
+          repository: YOUR_NAME/YOUR_CONTENT_REPO
+          ref: ${{ github.event.client_payload.sha }}
+          path: .content-src
+          token: ${{ secrets.CONTENT_REPO_TOKEN }}
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm content:sync  # 内容物化 + 配置覆盖
+      - run: pnpm build         # 静态构建，产物在 dist/
+
+      - name: Push dist to deploy branch   # 孤儿提交强推，分支只含 dist/
+        env:
+          DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+        run: |
+          git init -q deploy-repo
+          mv dist deploy-repo/dist
+          cd deploy-repo
+          git checkout -q -b deploy
+          git config user.name &quot;deploy-bot&quot;
+          git config user.email &quot;deploy-bot@users.noreply.github.com&quot;
+          git add -A
+          git commit -qm &quot;deploy: content ${{ github.sha }}&quot;
+          git push -q --force \
+            &quot;https://x-access-token:${DEPLOY_TOKEN}@github.com/${GITHUB_REPOSITORY}.git&quot; \
+            deploy:deploy
+
+      - name: Notify server and wait for deployment    # 通知 + 轮询
+        env:
+          HOOK_URL: ${{ secrets.DEPLOY_HOOK_URL }}
+          HOOK_SECRET: ${{ secrets.DEPLOY_HOOK_SECRET }}
+        run: |
+          payload=&apos;{&quot;repository&quot;:&quot;&apos;$GITHUB_REPOSITORY&apos;&quot;,&quot;sha&quot;:&quot;&apos;$CONTENT_SHA&apos;&quot;}&apos;
+          signature=$(printf &apos;%s&apos; &quot;$payload&quot; \
+            | openssl dgst -sha256 -hmac &quot;$HOOK_SECRET&quot; -hex | sed &apos;s/^.* //&apos;)
+          body=$(curl --fail-with-body -sS --request POST &quot;$HOOK_URL&quot; \
+            --header &quot;X-Signature: sha256=$signature&quot; --data &quot;$payload&quot;)
+          ticket=$(printf &apos;%s&apos; &quot;$body&quot; | sed -n &apos;s/.*&quot;ticket&quot;:&quot;\([^&quot;]*\)&quot;.*/\1/p&apos;)
+          # 每 10 秒轮询一次 ticket 状态，直到 done / failed / 超时
+          # （完整轮询循环见主题仓 deploy.yml）
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;主题仓 Secrets 一览：&lt;/p&gt;
+&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;Secret&lt;/th&gt;
+&lt;th&gt;值&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;CONTENT_REPO_TOKEN&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;PAT（拉内容仓）&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;DEPLOY_TOKEN&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;PAT（推 deploy 分支）&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;DEPLOY_HOOK_URL&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;https://admin.你的域名/api/deploy/hook&lt;/code&gt;&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;DEPLOY_HOOK_SECRET&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;第 1 步生成的随机串&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;h3&gt;第 4 步：服务器——稀疏克隆与 admin 部署&lt;/h3&gt;
+&lt;p&gt;&lt;strong&gt;一次性初始化&lt;/strong&gt;——稀疏克隆产物仓库（磁盘上只会有 &lt;code&gt;dist/&lt;/code&gt;，没有源码和历史）：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;git clone --filter=blob:none --no-checkout --single-branch \
+     --branch deploy https://github.com/YOUR_NAME/YOUR_THEME.git /www/wwwroot/blog
+cd /www/wwwroot/blog
+git sparse-checkout set dist
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;&lt;strong&gt;部署 admin&lt;/strong&gt;（Node 20+，以宝塔 Node 项目为例）：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;git clone https://github.com/YOUR_NAME/YOUR_ADMIN.git /www/wwwroot/blog-admin
+cd /www/wwwroot/blog-admin &amp;amp;&amp;amp; npm install --omit=dev
+cp .env.example .env
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;&lt;code&gt;.env&lt;/code&gt; 关键项：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;ADMIN_PASSWORD=&amp;lt;登录密码&amp;gt;
+GITHUB_TOKEN=&amp;lt;PAT&amp;gt;          # 推文章用
+GITHUB_OWNER=&amp;lt;你的用户名&amp;gt;
+GITHUB_REPO=&amp;lt;内容仓名&amp;gt;
+DEPLOY_SECRET=&amp;lt;第 1 步的随机串&amp;gt;   # 与 DEPLOY_HOOK_SECRET 相同
+DEPLOY_DIR=/www/wwwroot/blog
+DEPLOY_BRANCH=deploy
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;admin 收到 webhook 后的核心逻辑只有两行 git：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;git(dir, [&quot;fetch&quot;, &quot;origin&quot;, branch, &quot;--depth=1&quot;]);
+git(dir, [&quot;reset&quot;, &quot;--hard&quot;, &quot;FETCH_HEAD&quot;]);
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;配合 &lt;code&gt;sparse-checkout&lt;/code&gt;，这两行就是&quot;部署&quot;的全部。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;nginx&lt;/strong&gt;：博客站点 &lt;code&gt;root /www/wwwroot/blog/dist;&lt;/code&gt;；admin 站点反代 &lt;code&gt;127.0.0.1:3777&lt;/code&gt; 并带上 &lt;code&gt;X-Forwarded-Proto&lt;/code&gt; 头。&lt;/p&gt;
+&lt;h3&gt;第 5 步：端到端验证&lt;/h3&gt;
+&lt;p&gt;admin 发一条动态 → 内容仓 Actions 校验+派发全绿 → 主题仓 Actions 构建全绿 → 日志末尾出现&quot;服务器拉取部署完成&quot; → 刷新博客看到内容上线。全链路 3~4 分钟。&lt;/p&gt;
+&lt;h2&gt;三、坑点集锦&lt;/h2&gt;
+&lt;p&gt;链路能跑通只是及格线。以下 10 个坑，每一个都真实地消耗了我们排障时间——建议搭建前通读一遍，尤其是 3、4、5 这三个&quot;静默失败&quot;。&lt;/p&gt;
+&lt;h3&gt;坑 1：&lt;code&gt;secrets&lt;/code&gt; 不能用在 step 级 &lt;code&gt;if&lt;/code&gt; 里&lt;/h3&gt;
+&lt;p&gt;&lt;strong&gt;现象&lt;/strong&gt;：内容仓 workflow 直接报错无法运行：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;Invalid workflow file
+(Line: 41, Col: 13): Unrecognized named-value: &apos;secrets&apos;.
+Located at position 1 within expression: secrets.DISPATCH_TOKEN != &apos;&apos;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;&lt;strong&gt;原因&lt;/strong&gt;：GitHub Actions 的 &lt;code&gt;secrets&lt;/code&gt; 上下文在 &lt;strong&gt;job 级 &lt;code&gt;if&lt;/code&gt;&lt;/strong&gt; 里可用，但在 &lt;strong&gt;step 级 &lt;code&gt;if&lt;/code&gt;&lt;/strong&gt; 里不可用。这是官方文档里写得很隐蔽的限制。上游主题模板自带的 &lt;code&gt;trigger-build.yml.example&lt;/code&gt; 就踩了这个雷——而模板作者大概率从没实际启用过这个文件（它以 &lt;code&gt;.example&lt;/code&gt; 后缀存在，启用前不会被 Actions 解析）。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;解法&lt;/strong&gt;：经典的 env 中转：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;- name: Dispatch build event
+  env:
+    HAS_TOKEN: ${{ secrets.DISPATCH_TOKEN != &apos;&apos; }}   # env 赋值处可以用 secrets
+  if: env.HAS_TOKEN == &apos;true&apos;                        # if 里只引用 env
+&lt;/code&gt;&lt;/pre&gt;
+&lt;h3&gt;坑 2：私有仓的 token 权限问题表现为 404 而不是 403&lt;/h3&gt;
+&lt;p&gt;&lt;strong&gt;现象&lt;/strong&gt;：admin 打开就弹 &lt;code&gt;GitHub API 404 : Not Found&lt;/code&gt;。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;原因&lt;/strong&gt;：GitHub 对私有仓库的设计是——&lt;strong&gt;token 看不到这个仓库时返回 404&lt;/strong&gt;，而不是 403，为了避免泄露仓库的存在性。当时手头有好几枚 PAT（主题仓一枚、内容仓一枚），&lt;code&gt;.env&lt;/code&gt; 里贴错了仓库的 token，于是&quot;仓库存在但无权访问&quot;被表现成了&quot;仓库不存在&quot;。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;教训&lt;/strong&gt;：多枚 PAT 并存时，先写好&quot;哪枚 token 管哪个仓&quot;的对照表再动手。Fine-grained PAT 的 Repository access 是显式勾选的，勾了 A 仓就绝对访问不了 B 仓。诊断时直接：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;curl -s -w &quot;%{http_code}&quot; -H &quot;Authorization: Bearer $TOKEN&quot; \
+  https://api.github.com/repos/OWNER/REPO
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;404 = token 不认这个仓，401 = token 本身无效，200 = 通了。&lt;/p&gt;
+&lt;h3&gt;坑 3：GitHub Trees API 与本地文件树的类型不一致&lt;/h3&gt;
+&lt;p&gt;&lt;strong&gt;现象&lt;/strong&gt;：admin 登录正常、API 全部 200、不报任何错，但文章/动态列表&lt;strong&gt;恒为空&lt;/strong&gt;。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;原因&lt;/strong&gt;：存储层有两个实现——DEV 模式读本地磁盘，生产模式调 GitHub API。GitHub Trees API 返回的文件类型是 &lt;code&gt;&quot;blob&quot;&lt;/code&gt;、目录是 &lt;code&gt;&quot;tree&quot;&lt;/code&gt;；而本地实现返回 &lt;code&gt;&quot;file&quot;&lt;/code&gt; / &lt;code&gt;&quot;dir&quot;&lt;/code&gt;。消费端写的是 &lt;code&gt;if (item.type !== &quot;file&quot;) continue;&lt;/code&gt;——DEV 模式一切正常，一上生产，每个文件都被静默过滤，返回空数组。&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;// 修复：在生产实现的出口做类型归一化
+const TYPE_MAP = { blob: &quot;file&quot;, tree: &quot;dir&quot; };
+return items.map((i) =&amp;gt; ({ path: i.path, type: TYPE_MAP[i.type] || i.type }));
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;&lt;strong&gt;教训&lt;/strong&gt;：同一个接口有多个后端实现时，&lt;strong&gt;类型契约必须在出口处归一化&lt;/strong&gt;，否则 DEV 测不出来、生产必炸。这类&quot;安静的 bug&quot;比报错的可怕得多——API 200 让你完全怀疑不到代码层。&lt;/p&gt;
+&lt;h3&gt;坑 4：YAML 引号时间戳过不了 Astro 的 z.date() 校验&lt;/h3&gt;
+&lt;p&gt;&lt;strong&gt;现象&lt;/strong&gt;：内容仓校验 job 失败：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;[InvalidContentEntryDataError] moments → 2026-09-04-post
+data does not match collection schema
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;&lt;strong&gt;原因&lt;/strong&gt;：一条链式的类型丢失——&lt;/p&gt;
+&lt;ol&gt;
+&lt;li&gt;admin 生成 frontmatter 时为了防特殊字符歧义，全局设了 &lt;code&gt;defaultStringType: &quot;QUOTE_DOUBLE&quot;&lt;/code&gt;，所有字符串值都带双引号输出；&lt;/li&gt;
+&lt;li&gt;主题的 content schema 要求 &lt;code&gt;published: z.date()&lt;/code&gt;；&lt;/li&gt;
+&lt;li&gt;Astro 内容层用 gray-matter 解析 frontmatter，其 YAML 解析遵循 &lt;strong&gt;YAML 1.1 语义&lt;/strong&gt;：&lt;strong&gt;无引号&lt;/strong&gt;的 &lt;code&gt;2026-09-04 05:50:13&lt;/code&gt; 才会被识别为 timestamp 解析成 &lt;code&gt;Date&lt;/code&gt;；&lt;strong&gt;带引号就恒为 string&lt;/strong&gt;，直接被 &lt;code&gt;z.date()&lt;/code&gt; 拒掉。&lt;/li&gt;
+&lt;/ol&gt;
+&lt;pre&gt;&lt;code&gt;published: &quot;2026-09-04 05:50:13&quot;   # ✗ 解析为 string，校验失败
+published: 2026-09-04 05:50:13     # ✓ 解析为 Date，校验通过
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;&lt;strong&gt;修复&lt;/strong&gt;：序列化后做行级后处理，只对命中日期时间格式的值剥引号：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;raw.split(&quot;\n&quot;).map((line) =&amp;gt;
+  line.replace(
+    /^(\s*)([\w-]+): &quot;(\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?)?)&quot;$/,
+    &quot;$1$2: $3&quot;,
+  ),
+).join(&quot;\n&quot;);
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;期间还尝试过 yaml 库的 &lt;code&gt;Scalar + format: &quot;PLAIN&quot;&lt;/code&gt;、&lt;code&gt;new Scalar(v, { tag })&lt;/code&gt; 等方案，全部无效——&lt;code&gt;QUOTE_DOUBLE&lt;/code&gt; 默认的优先级压过了这些设置。正则后处理虽然&quot;不优雅&quot;，但它&lt;strong&gt;确定性地工作&lt;/strong&gt;。&lt;/p&gt;
+&lt;h3&gt;坑 5：Express 路由级 raw-body 捕获静默失效&lt;/h3&gt;
+&lt;p&gt;&lt;strong&gt;现象&lt;/strong&gt;：Actions 通知服务器时，admin 返回 500。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;原因&lt;/strong&gt;：部署 webhook 需要 HMAC 验签，签名要算在&lt;strong&gt;原始请求字节&lt;/strong&gt;上，所以需要捕获 rawBody。当时的写法：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;// server.js
+app.use(express.json({ limit: &quot;2mb&quot; }));       // 全局解析
+
+// routes/api.js
+const deployRawBody = express.json({           // 路由级再来一次，带 verify
+  verify: (req, _res, buf) =&amp;gt; { req.rawBody = buf; },
+});
+router.post(&quot;/deploy/hook&quot;, deployRawBody, ...);
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;问题在于 body-parser 内部机制：全局 &lt;code&gt;express.json()&lt;/code&gt; 解析后会在 req 上标记 &lt;code&gt;req._body = true&lt;/code&gt;，路由级的解析器看到这个标记会&lt;strong&gt;直接跳过&lt;/strong&gt;——连 &lt;code&gt;verify&lt;/code&gt; 回调都不执行。于是 &lt;code&gt;req.rawBody&lt;/code&gt; 是 &lt;code&gt;undefined&lt;/code&gt;，&lt;code&gt;crypto.createHmac().update(undefined)&lt;/code&gt; 抛 TypeError → 500。&lt;/p&gt;
+&lt;p&gt;更阴险的是，本地测试时用浏览器裸 POST（不带签名头），代码在&quot;签名头不存在的&quot;分支就返回 401 了，根本走不到 update 那一行——&lt;strong&gt;测试路径完美掩盖了 bug&lt;/strong&gt;。直到 Actions 带着正确签名头打过来才引爆。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;解法&lt;/strong&gt;：rawBody 捕获挪到全局解析器的 &lt;code&gt;verify&lt;/code&gt; 里，一处捕获处处可用：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;app.use(express.json({
+  limit: &quot;2mb&quot;,
+  verify: (req, _res, buf) =&amp;gt; { req.rawBody = buf; },
+}));
+&lt;/code&gt;&lt;/pre&gt;
+&lt;h3&gt;坑 6：CSS &lt;code&gt;display&lt;/code&gt; 声明会顶掉 HTML &lt;code&gt;hidden&lt;/code&gt; 属性&lt;/h3&gt;
+&lt;p&gt;&lt;strong&gt;现象&lt;/strong&gt;：明明是生产模式，界面却显示&quot;DEV 下载模式&quot;徽标。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;原因&lt;/strong&gt;：JS 逻辑完全正确（服务端返回 &lt;code&gt;devMode: false&lt;/code&gt;，前端也确实没移除 &lt;code&gt;hidden&lt;/code&gt; 属性，DOM 检查 &lt;code&gt;el.hidden === true&lt;/code&gt;），但 CSS 里 &lt;code&gt;.badge { display: inline-flex }&lt;/code&gt; 的优先级&lt;strong&gt;高于&lt;/strong&gt;浏览器对 &lt;code&gt;[hidden]&lt;/code&gt; 属性默认的 &lt;code&gt;display: none&lt;/code&gt;。于是元素&quot;逻辑上隐藏、样式上可见&quot;。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;解法&lt;/strong&gt;：一条全局规则，让 &lt;code&gt;hidden&lt;/code&gt; 永远赢：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;[hidden] { display: none !important; }
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;&lt;strong&gt;教训&lt;/strong&gt;：HTML 的 &lt;code&gt;hidden&lt;/code&gt; 属性只是&quot;未样式化的默认&quot;，任何显式 &lt;code&gt;display&lt;/code&gt; 都会覆盖它。只要页面里有元素类设了 display，就该配这条防御性规则。&lt;/p&gt;
+&lt;h3&gt;坑 7：创建孤儿分支的正确姿势（以及我搞砸的两次）&lt;/h3&gt;
+&lt;p&gt;需求：把本地 &lt;code&gt;dist/&lt;/code&gt; 推成一个只含产物的 &lt;code&gt;deploy&lt;/code&gt; 孤儿分支。听起来简单，实际连翻两次车：&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;翻车一&lt;/strong&gt;：&lt;code&gt;git switch --orphan deploy&lt;/code&gt; 被工作区未提交改动拦截（安全机制，正常），改用 plumbing 命令（&lt;code&gt;update-index&lt;/code&gt; + &lt;code&gt;write-tree&lt;/code&gt; + &lt;code&gt;commit-tree&lt;/code&gt;）时，在错误的 index 状态下 &lt;code&gt;write-tree&lt;/code&gt; 把 &lt;strong&gt;main 的完整目录树&lt;/strong&gt;写了进去，推上去一个 56MB 的&quot;孤儿&quot;分支——它确实无 parent，但内容是整个项目。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;翻车二&lt;/strong&gt;：用临时 worktree 方案重做，命令本身对了，但&lt;strong&gt;终端当时 cd 在另一个仓库里&lt;/strong&gt;，整串操作（worktree、提交、push）全部落在了错误的仓库上；而随后的验证命令也在同一个错误仓库里执行，看到了那个仓库的 &lt;code&gt;origin/deploy&lt;/code&gt;，得出&quot;成功&quot;的假象。直到用 &lt;code&gt;rev-list --count&lt;/code&gt;（提交数）、&lt;code&gt;cat-file -p&lt;/code&gt;（查 parent 行）这类&lt;strong&gt;不可伪造的指标&lt;/strong&gt;重新硬核验证，才发现远端根本没变。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;正确姿势&lt;/strong&gt;（Windows PowerShell，全程显式路径，绝不依赖 cwd）：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;$tmp = &quot;$env:TEMP\deploy-$PID&quot;
+New-Item -ItemType Directory &quot;$tmp\dist&quot; -Force
+Copy-Item &quot;D:\project\Shirone\dist\*&quot; &quot;$tmp\dist\&quot; -Recurse
+git -C $tmp init -q -b deploy
+git -C $tmp add -A
+git -C $tmp commit -qm &quot;deploy: ...&quot;
+git -C $tmp push --force https://github.com/OWNER/REPO.git deploy:deploy
+Remove-Item -Recurse -Force $tmp
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;&lt;strong&gt;教训&lt;/strong&gt;：① shell 里连续操作多个仓库时，每条 git 命令都带 &lt;code&gt;-C &amp;lt;绝对路径&amp;gt;&lt;/code&gt;；② 验证结果要用结构性指标（提交数、树内容、parent 行），不要只看命令退出码，&lt;strong&gt;尤其是在错误的目录里连验证都是错的&lt;/strong&gt;。&lt;/p&gt;
+&lt;h3&gt;坑 8：&lt;code&gt;safe.directory&lt;/code&gt; 只认属主 UID，不看组&lt;/h3&gt;
+&lt;p&gt;&lt;strong&gt;现象&lt;/strong&gt;：服务器上操作 git 仓库连环报 &lt;code&gt;fatal: detected dubious ownership&lt;/code&gt;。明明做过 &lt;code&gt;chown -R www-data:neeco&lt;/code&gt;，为什么 neeco 还是&quot;疑权&quot;？&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;原因&lt;/strong&gt;：git 的 safe.directory 机制&lt;strong&gt;只信任仓库属主的 UID&lt;/strong&gt;，组权限再开也不行。而这条链路上天然存在三个 git 用户：&lt;code&gt;neeco&lt;/code&gt;（SSH 登录）、&lt;code&gt;www-data&lt;/code&gt;/&lt;code&gt;www&lt;/code&gt;（服务进程）、&lt;code&gt;root&lt;/code&gt;（sudo 操作），谁克隆的仓库对另外两家都是&quot;dubious&quot;。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;解法&lt;/strong&gt;（组合拳）：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;# 1. 仓库统一归属给服务进程用户（它要写 .git，最重要）
+sudo chown -R www:www /www/wwwroot/blog
+
+# 2. 人类用户加个人例外（写进自己的 ~/.gitconfig）
+git config --global --add safe.directory /www/wwwroot/blog
+
+# 3. root 也加一份（sudo 操作时生效）
+sudo git config --global --add safe.directory /www/wwwroot/blog
+
+# 4. 应用进程里执行 git 时，直接带参数，不依赖任何 global config
+execFileSync(&quot;git&quot;, [&quot;-c&quot;, `safe.directory=${dir}`, &quot;-C&quot;, dir, ...args])
+&lt;/code&gt;&lt;/pre&gt;
+&lt;h3&gt;坑 9：宝塔的 &lt;code&gt;www&lt;/code&gt; ≠ Ubuntu 的 &lt;code&gt;www-data&lt;/code&gt;&lt;/h3&gt;
+&lt;p&gt;&lt;strong&gt;现象&lt;/strong&gt;：权限明明 &lt;code&gt;chown -R www-data:www-data&lt;/code&gt; 了，部署时还是 &lt;code&gt;cannot open &apos;.git/FETCH_HEAD&apos;: Permission denied&lt;/code&gt;。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;原因&lt;/strong&gt;：&lt;code&gt;ps aux&lt;/code&gt; 一查，admin 进程的用户是 &lt;strong&gt;&lt;code&gt;www&lt;/code&gt;&lt;/strong&gt;——宝塔面板自建的用户，和 Ubuntu 系统自带的 &lt;code&gt;www-data&lt;/code&gt; &lt;strong&gt;是两个不同的用户&lt;/strong&gt;。宝塔的 Node 项目管理器和它的 nginx 都用 &lt;code&gt;www&lt;/code&gt; 跑，而我在 systemd 时代的习惯（&lt;code&gt;User=www-data&lt;/code&gt;）先入为主了。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;教训&lt;/strong&gt;：环境迁移（systemd → 宝塔）时，&lt;strong&gt;一切以 &lt;code&gt;ps aux&lt;/code&gt; 的实际输出为准&lt;/strong&gt;，不要凭上一个环境的经验。一行命令的事：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;ps aux | grep node | grep -v grep
+&lt;/code&gt;&lt;/pre&gt;
+&lt;h3&gt;坑 10：www-data 没有 HOME，&lt;code&gt;git config --global&lt;/code&gt; 会炸&lt;/h3&gt;
+&lt;p&gt;给服务用户加 safe.directory 例外时：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;error: could not lock config file /var/www/.gitconfig: No such file or directory
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;&lt;code&gt;--global&lt;/code&gt; 写的是 &lt;code&gt;$HOME/.gitconfig&lt;/code&gt;，而 &lt;code&gt;www-data&lt;/code&gt;/&lt;code&gt;www&lt;/code&gt; 这类非登录用户的 HOME 目录根本不存在。先 &lt;code&gt;mkdir -p&lt;/code&gt; 再执行；或者干脆走坑 8 的第 4 招——应用侧 &lt;code&gt;-c&lt;/code&gt; 参数内联，绕开 global config 依赖。&lt;/p&gt;
+&lt;h2&gt;四、一些设计决策的回望&lt;/h2&gt;
+&lt;p&gt;&lt;strong&gt;为什么 webhook 要带 HMAC 而不是简单密码&lt;/strong&gt;：hook 端点暴露在公网（Actions 要能调到它），一个静态密码会在每个请求里明文传输。HMAC-SHA256 对 payload 签名，密钥不出现在请求中，且防篡改。实现上有个细节：轮询用的 GET 没有请求体，签名约定对&lt;strong&gt;空串&lt;/strong&gt;计算——两端必须一致，否则永远 401。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;为什么 Actions 要轮询等部署完成&lt;/strong&gt;：如果通知完就走，workflow 绿了但服务器可能拉取失败，链路断了都不知道。轮询 ticket 到 &lt;code&gt;done&lt;/code&gt;/&lt;code&gt;failed&lt;/code&gt; 才结束，把&quot;服务器真的部署成功了吗&quot;纳入 CI 的成败判定里。代价是 Actions 要多跑一两分钟，但换来了&lt;strong&gt;端到端的可观测性&lt;/strong&gt;——这次排障中，&quot;轮询返回的错误详情&quot;（FETCH_HEAD Permission denied）直接把问题钉死，不用登服务器翻日志。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;为什么服务器拉取用 &lt;code&gt;--depth=1&lt;/code&gt; + &lt;code&gt;reset --hard&lt;/code&gt;&lt;/strong&gt;：部署只关心最新状态，浅拉取省带宽；&lt;code&gt;reset --hard FETCH_HEAD&lt;/code&gt; 天然幂等，重复触发无副作用。配合稀疏克隆（&lt;code&gt;--filter=blob:none&lt;/code&gt; + &lt;code&gt;sparse-checkout set dist&lt;/code&gt;），服务器磁盘上只有产物，没有源码和历史包袱。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;回滚的意外收获&lt;/strong&gt;：deploy 分支每次部署一个孤儿提交，天然形成版本序列。回滚 = 服务器上 &lt;code&gt;git fetch --depth=50 &amp;amp;&amp;amp; git reset --hard &amp;lt;旧提交&amp;gt;&lt;/code&gt;，秒级完成，这是当初选分支方案时没充分预料到的红利。&lt;/p&gt;
+&lt;h2&gt;五、最终链路与验证&lt;/h2&gt;
+&lt;p&gt;全自动流水线的完整形态：&lt;/p&gt;
+&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;步骤&lt;/th&gt;
+&lt;th&gt;触发方式&lt;/th&gt;
+&lt;th&gt;耗时&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;admin 写作 → 推内容仓&lt;/td&gt;
+&lt;td&gt;表单保存（Contents API）&lt;/td&gt;
+&lt;td&gt;秒级&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;内容仓校验 + 派发&lt;/td&gt;
+&lt;td&gt;push 自动&lt;/td&gt;
+&lt;td&gt;~1 分钟&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;主题仓构建 + 推 deploy 分支&lt;/td&gt;
+&lt;td&gt;repository_dispatch 自动&lt;/td&gt;
+&lt;td&gt;~2 分钟&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;服务器拉取 + 上线&lt;/td&gt;
+&lt;td&gt;webhook 自动&lt;/td&gt;
+&lt;td&gt;秒级&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;Actions 确认部署结果&lt;/td&gt;
+&lt;td&gt;轮询 ticket&lt;/td&gt;
+&lt;td&gt;含在上一步&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;端到端验证方法：admin 发一条动态 → 盯着 Actions 全绿 → 刷新博客看到内容上线。全链路 3~4 分钟，人类只负责写字。&lt;/p&gt;
+&lt;h2&gt;六、写在最后&lt;/h2&gt;
+&lt;p&gt;复盘这一天，坑的分布很有意思：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;上游模板的坑&lt;/strong&gt;（2 个）：&lt;code&gt;secrets&lt;/code&gt; 限制、部署路径不一致——模板功能看似齐全，实际是&quot;没被实战跑通&quot;的代码；&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;自研代码的坑&lt;/strong&gt;（4 个）：类型契约、YAML 时间戳、rawBody 捕获、CSS hidden——每一个都是&quot;本地测试好好的&quot;的静默故障；&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;环境与权限的坑&lt;/strong&gt;（4 个）：safe.directory、用户名错位、HOME 缺失、目录属主——跨服务器部署永远的经典节目。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;如果只能留三条经验：&lt;/p&gt;
+&lt;ol&gt;
+&lt;li&gt;&lt;strong&gt;静默失败比报错可怕&lt;/strong&gt;——API 返回 200 不代表数据正确，测试路径覆盖不到的分支，生产环境会替你覆盖；&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;验证要用不可伪造的指标&lt;/strong&gt;——退出码会说谎（尤其在错误的目录里），但提交数、类型、结构不会；&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;权限问题先 &lt;code&gt;ps aux&lt;/code&gt; 再 &lt;code&gt;ls -l&lt;/code&gt;&lt;/strong&gt;——先确认&quot;进程到底是谁&quot;，再看&quot;文件到底归谁&quot;，顺序反了就是无休止的瞎猜。&lt;/li&gt;
+&lt;/ol&gt;
+</content:encoded></item></channel></rss>
