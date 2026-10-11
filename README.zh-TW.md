@@ -24,7 +24,7 @@
 
 ## 從這裡開始
 
-[線上文件](https://docs.shirone.mysqil.com/)是設定主題、管理內容和部署網站的主要入口。本儲存庫包含主題原始碼；如果希望將個人內容獨立管理，請使用 [Shirone-Content](https://github.com/LyraVoid/Shirone-Content)。
+[線上文件](https://docs.shirone.mysqil.com/)是設定主題、管理內容和部署網站的主要入口。本儲存庫包含主題原始碼。如果不想跟著主題原始碼一起更新，可以直接安裝 [`shirones` npm 套件](#使用-npm-套件)：部落格只佔一個小儲存庫，主題更新用 `pnpm add shirones@latest` 就能取得。如果希望將個人內容獨立管理，請使用 [Shirone-Content](https://github.com/LyraVoid/Shirone-Content)。
 
 ## 實測表現
 
@@ -51,7 +51,7 @@ Shirone 是一款使用 Astro 7、Svelte 5、Tailwind CSS 4 與 Stylus 建構的
 
 柔軟的外表之下，是一套由設計令牌驅動的 Material 3 Expressive 元件系統。內容優先由伺服器端渲染輸出，Swup 則提供流暢的站內導覽，並讓頁面切換時的外圍應用框架持續運作。
 
-除了長篇文章，Shirone 也適合展示動態、相簿、追番、友站、專案、技能與時間軸等個人內容。
+除了長篇文章，Shirone 也適合展示動態、相簿、追番、友站、專案、技能、裝置、遊戲、系列連載與時間軸等個人內容。
 
 ## ✦ 魔導書裡的能力
 
@@ -62,12 +62,14 @@ Shirone 是一款使用 Astro 7、Svelte 5、Tailwind CSS 4 與 Stylus 建構的
 - 支援 Markdown 與 MDX，以及數學公式、Mermaid、提示區塊、增強程式碼區塊和圖片藝廊
 - Pagefind 全文搜尋、RSS 與 Sitemap
 - 文章目錄、延伸閱讀、分享、加密與可選留言
-- 彙整、分類、標籤、友站、動態、番劇、相簿、專案、技能和時間軸等獨立頁面
+- 彙整、分類、標籤、友站、動態、番劇、相簿、專案、技能、裝置、遊戲、系列和時間軸等獨立頁面
 - 內建 10 種介面語言
 - SSR 優先、鍵盤友善，並配有無障礙測試
 - 可選整合遵循「零額外負擔」原則：停用時不產生外部請求、DOM、版面位移或主套件程式碼
 
 ## 快速開始
+
+如果覺得跟著主題更新太麻煩，或者不想單獨維護一個主題儲存庫，直接用 npm 套件更省事——見[使用 npm 套件](#使用-npm-套件)。
 
 ### 環境需求
 
@@ -88,6 +90,19 @@ pnpm dev
 
 若 Windows PowerShell 的指令碼執行原則阻止命令執行，請改用 `pnpm.cmd` 與 `npx.cmd`。
 
+### 使用 npm 套件
+
+不想複製主題儲存庫？可以將 Shirone 安裝為 `shirones` npm 套件，在空資料夾中初始化部落格——無需 Astro 起始範本，也無需手動安裝依賴：
+
+```bash
+mkdir my-blog
+cd my-blog
+npx shirones init   # 寫入 package.json，安裝 astro、主題及其 peer 依賴
+pnpm dev
+```
+
+`init` 會建立 `astro.config.mjs`、`shirones/` 下的型別化設定、範例內容與靜態資源；你依然可以透過 `src/components/` 與 `src/layouts/` 覆寫主題元件。隨時重新執行 `npx shirones init` 檢查漂移（只報告、不修改）；執行 `npx shirones init --update` 還原缺失檔案，或 `--force` 從範本重新初始化。詳見 [shirones wiki](https://github.com/yCENzh/shirones/wiki)、[npm 套件模式](./docs/npm-package-mode.md) 與 [shirones 儲存庫](https://github.com/yCENzh/shirones)。
+
 ### 自訂網站
 
 1. 在 `src/config/siteConfig.ts` 設定正式網址、標題、語言、主題、橫幅與顯示選項。
@@ -105,7 +120,7 @@ Shirone 將主題原始碼、個人網站內容與 npm 發布職責分離；下�
 | 儲存庫 | 適用情境 | 包含內容 |
 | --- | --- | --- |
 | [Shirone-Content](https://github.com/LyraVoid/Shirone-Content) | 使用外部內容來源的雙儲存庫網誌 | 文章、動態、資料、媒體與 `config/*.yaml` 覆寫的內容範本。請 Fork 或複製到自己的儲存庫（通常設為私有），再讓本主題儲存庫指向它。參閱[內容分離指南](./docs/content-separation/README.md)。 |
-| [Shirone-NPM](https://github.com/LyraVoid/Shirone-NPM) | 維護與發布 `shirones` npm 套件 | 手動建置與發布流程。它在建置時拉取本儲存庫，並刻意不保存主題原始碼；一般網誌使用者應安裝 `shirones`，不需要直接使用此儲存庫。參閱 [npm 套件模式](./docs/npm-package-mode.md)。 |
+| [shirones](https://github.com/yCENzh/shirones) | 維護與發布 `shirones` npm 套件 | 手動建置與發布流程。它在建置時拉取本儲存庫，並刻意不保存主題原始碼；一般網誌使用者應安裝 `shirones`，不需要直接使用此儲存庫。參閱 [npm 套件模式](./docs/npm-package-mode.md)。 |
 
 ## 核心設定
 
@@ -172,6 +187,7 @@ pnpm build
 
 ## 專案文件
 
+- [shirones wiki](https://github.com/yCENzh/shirones/wiki) - 面向使用者的指南：安裝、設定、內容、元件覆寫、CLI 與疑難排解
 - [`src/config/README.md`](./src/config/README.md) - 設定參考
 - [`docs/m3e-standard.md`](./docs/m3e-standard.md) - 設計令牌與元件標準
 - [`docs/atomic-structure.md`](./docs/atomic-structure.md) - 元件分層與相依規則

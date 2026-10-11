@@ -1,4 +1,4 @@
-﻿import { permalinkConfig } from "../config/permalinkConfig.ts";
+import { permalinkConfig } from "../config/permalinkConfig.ts";
 import type I18nKey from "../i18n/i18nKey.ts";
 import { i18n } from "../i18n/translation.ts";
 import {
@@ -100,6 +100,11 @@ export function getCategoryUrl(category: string | null): string {
 	return url(`/archive/?category=${encodeURIComponent(category.trim())}`);
 }
 
+export function getSeriesUrl(series: string): string {
+	if (!series?.trim()) return url("/series/");
+	return url(`/series/${encodeURIComponent(series.trim())}/`);
+}
+
 export function getDir(path: string): string {
 	const lastSlashIndex = path.lastIndexOf("/");
 	if (lastSlashIndex < 0) {
@@ -108,6 +113,57 @@ export function getDir(path: string): string {
 	return path.substring(0, lastSlashIndex + 1);
 }
 
-export function url(path: string): string {
-	return joinUrl("", import.meta.env?.BASE_URL ?? "/", path);
+export function url(path: string, baseUrlOverride?: string): string {
+	if (!path) {
+		return baseUrlOverride ?? import.meta.env?.BASE_URL ?? "/";
+	}
+	if (
+		path.startsWith("http://") ||
+		path.startsWith("https://") ||
+		path.startsWith("data:") ||
+		path.startsWith("#") ||
+		path.startsWith("mailto:") ||
+		path.startsWith("tel:") ||
+		path.startsWith("javascript:")
+	) {
+		return path;
+	}
+	const baseUrl = baseUrlOverride ?? import.meta.env?.BASE_URL ?? "/";
+	const normalizedBase = baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`;
+	const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+
+	if (
+		normalizedBase !== "/" &&
+		(normalizedPath === baseUrl || normalizedPath.startsWith(normalizedBase))
+	) {
+		return normalizedPath;
+	}
+	return joinUrl("", baseUrl, path);
+}
+
+/**
+ * 将相对路径或绝对路径解析为完整的绝对 URL（附带域名与 base 路径）。
+ * 针对已包含协议的外部 URL 或 Data URL 原样返回；
+ * 若未提供 baseOrigin 则回退为带 base 的相对路径。
+ */
+export function toAbsoluteUrl(
+	path: string,
+	baseOrigin?: string | URL,
+	baseUrlOverride?: string,
+): string {
+	if (!path) return "";
+	if (
+		path.startsWith("http://") ||
+		path.startsWith("https://") ||
+		path.startsWith("data:")
+	) {
+		return path;
+	}
+	const pathWithBase = url(path, baseUrlOverride);
+	if (!baseOrigin) return pathWithBase;
+	try {
+		return new URL(pathWithBase, baseOrigin).href;
+	} catch {
+		return pathWithBase;
+	}
 }

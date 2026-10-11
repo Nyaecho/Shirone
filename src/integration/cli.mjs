@@ -1,20 +1,30 @@
 #!/usr/bin/env node
+
 /**
  * Shirone CLI.
  *
- *   npx shirones init      scaffold config, content and static assets
- *   npx shirones init --force
- *   npx shirones info      print resolved paths and the injected route table
+ *   npx shirones init            scaffold config, content and static assets
+ *   npx shirones init --update   restore missing files on an existing project
+ *   npx shirones init --force    replace template files after backing them up
+ *   npx shirones info            detailed status and drift report
  *
  * The command is intentionally dependency-free so it can run via `npx` in a
  * bare project before anything else is installed.
  */
 
-import { existsSync } from "node:fs";
-import { cp, mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import {
+	cp,
+	mkdir,
+	readdir,
+	readFile,
+	rename,
+	writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawnSync } from "node:child_process";
 
 const PACKAGE_ROOT = resolve(fileURLToPath(import.meta.url), "../..");
 const TEMPLATE_DIR = join(PACKAGE_ROOT, "template");
@@ -36,7 +46,10 @@ const colours = {
 const log = {
 	step: (msg) => console.log(`${colours.cyan}›${colours.reset} ${msg}`),
 	ok: (msg) => console.log(`${colours.green}✓${colours.reset} ${msg}`),
-	skip: (msg) => console.log(`${colours.dim}·${colours.reset} ${colours.dim}${msg}${colours.reset}`),
+	skip: (msg) =>
+		console.log(
+			`${colours.dim}·${colours.reset} ${colours.dim}${msg}${colours.reset}`,
+		),
 	warn: (msg) => console.log(`${colours.yellow}!${colours.reset} ${msg}`),
 	err: (msg) => console.error(`${colours.red}✗${colours.reset} ${msg}`),
 };
@@ -68,16 +81,39 @@ async function readPackageManager() {
 	}
 }
 
+/** Print the package contract before every CLI command. */
+async function printCliNotice() {
+	const pmPin = (await readPackageManager()) ?? "pnpm";
+	console.log(`
+${colours.bold}Shirone${colours.reset} · package manager
+${colours.dim}  shirones uses ${pmPin} — the version shipped with this release.
+  \`init\` sets up pnpm projects only; if npm or yarn is your jam, please migrate manually. Your lockfile, your adventure.
+  If you like the project, give https://github.com/yCENzh/shirones a star. It helps keep the maintainer's terminal pleasantly quiet.${colours.reset}
+`);
+}
+
 async function copyEntry(from, to, { force, quiet = false }) {
 	if (!existsSync(from)) return { copied: false, reason: "missing" };
 	if (existsSync(to) && !force) {
-		if (!quiet) log.skip(`${relative(CWD, to) || "."} already exists (use --force to overwrite)`);
+		if (!quiet)
+			log.skip(
+				`${relative(CWD, to) || "."} already exists (use --force to overwrite)`,
+			);
 		return { copied: false, reason: "exists" };
+	}
+	let saved;
+	if (existsSync(to) && force) {
+		saved = await backup(relative(CWD, to));
 	}
 	await mkdir(dirname(to), { recursive: true });
 	await cp(from, to, { recursive: true, force: true });
-	if (!quiet) log.ok(relative(CWD, to) || ".");
-	return { copied: true };
+	if (!quiet) {
+		const label = relative(CWD, to) || ".";
+		log.ok(
+			saved ? `${label} replaced (--force), kept a copy at ${saved}` : label,
+		);
+	}
+	return { copied: true, saved };
 }
 
 /**
@@ -89,7 +125,9 @@ async function copyEntry(from, to, { force, quiet = false }) {
  * theme's static assets — favicons, banners, album demos — and the first hint
  * was a deployed site missing images.
  *
- * Existing files are kept unless --force, so re-running `init` is safe.
+ * Existing files are kept unless --force. Forced replacements are moved to
+ * `.shirones-backup/` first, so even an explicit refresh never destroys the
+ * previous copy.
  */
 async function mergeDirectory(from, to, { force }) {
 	if (!existsSync(from)) return { added: 0, kept: 0 };
@@ -106,9 +144,13 @@ async function mergeDirectory(from, to, { force }) {
 				await walk(nextSource, nextTarget);
 				continue;
 			}
+			let saved;
 			if (existsSync(nextTarget) && !force) {
 				kept += 1;
 				continue;
+			}
+			if (existsSync(nextTarget) && force) {
+				saved = await backup(relative(CWD, nextTarget));
 			}
 			await cp(nextSource, nextTarget, { force: true });
 			added += 1;
@@ -195,7 +237,11 @@ async function ensurePnpmWorkspace() {
 
 	const allowIndex = lines.findIndex((line) => /^allowBuilds:\s*$/.test(line));
 	if (allowIndex === -1) {
-		lines = [...lines.join("\n").trimEnd().split("\n"), "", ...allowBlock.split("\n")];
+		lines = [
+			...lines.join("\n").trimEnd().split("\n"),
+			"",
+			...allowBlock.split("\n"),
+		];
 	} else {
 		// Rewrite the whole indented block so placeholders become `true`.
 		let end = allowIndex + 1;
@@ -214,7 +260,10 @@ async function ensurePnpmWorkspace() {
 	}
 
 	if (!lines.some((line) => /^onlyBuiltDependencies:\s*$/.test(line))) {
-		lines = [...lines.join("\n").trimEnd().split("\n"), ...onlyBlock.split("\n")];
+		lines = [
+			...lines.join("\n").trimEnd().split("\n"),
+			...onlyBlock.split("\n"),
+		];
 	}
 
 	const next = `${lines.join("\n").trimEnd()}\n`;
@@ -226,7 +275,10 @@ async function ensurePnpmWorkspace() {
 	log.ok("pnpm-workspace.yaml");
 }
 
-async function ensurePackageJson(packageName) {
+async function ensurePackageJson(
+	packageName,
+	{ syncPackageManager = false } = {},
+) {
 	const pkgPath = join(CWD, "package.json");
 	const peers = await themePeers();
 	const packageManager = await readPackageManager();
@@ -238,7 +290,9 @@ async function ensurePackageJson(packageName) {
 		const version = await readPackageVersion();
 		const dependencies = {
 			astro: peers.astro ?? "^7.0.0",
-			...Object.fromEntries(Object.entries(peers).filter(([name]) => name !== "astro")),
+			...Object.fromEntries(
+				Object.entries(peers).filter(([name]) => name !== "astro"),
+			),
 			[packageName]: version ? `^${version}` : "latest",
 		};
 		const pkg = {
@@ -275,13 +329,28 @@ async function ensurePackageJson(packageName) {
 	const version = await readPackageVersion();
 	const wantedDeps = {
 		astro: peers.astro ?? "^7.0.0",
-		...Object.fromEntries(Object.entries(peers).filter(([name]) => name !== "astro")),
+		...Object.fromEntries(
+			Object.entries(peers).filter(([name]) => name !== "astro"),
+		),
 		[packageName]: version ? `^${version}` : "latest",
 	};
 
 	const addedDeps = [];
+	const upgradedDeps = [];
 	for (const [dep, range] of Object.entries(wantedDeps)) {
-		if (pkg.dependencies[dep] || pkg.devDependencies[dep]) continue;
+		const declared = pkg.dependencies[dep] ?? pkg.devDependencies[dep];
+		if (declared) {
+			// A declared dependency that can no longer satisfy the theme's
+			// requirement would break the build (e.g. a starter pinned astro@5
+			// while the theme needs astro@^7). Bump it and say so.
+			if (rangeLower(rangeFloor(declared), rangeFloor(range))) {
+				pkg.dependencies[dep] = range;
+				delete pkg.devDependencies[dep];
+				upgradedDeps.push({ dep, from: declared, to: range });
+				changed = true;
+			}
+			continue;
+		}
 		pkg.dependencies[dep] = range;
 		addedDeps.push(dep);
 		changed = true;
@@ -304,9 +373,16 @@ async function ensurePackageJson(packageName) {
 		changed = true;
 	}
 
-	// Same package-manager pin as the freshly-created case, but never clobber
-	// a version the user already chose themselves.
-	if (packageManager && !pkg.packageManager) {
+	// A fresh project gets the package pin above. On an explicit `--update`,
+	// advance an older Shirone-generated pin to the current package pin too;
+	// otherwise the project would keep running the previous release's pnpm even
+	// after the user updated the theme. Do not touch a user's package manager
+	// during an ordinary init.
+	if (
+		packageManager &&
+		(!pkg.packageManager ||
+			(syncPackageManager && pkg.packageManager !== packageManager))
+	) {
 		pkg.packageManager = packageManager;
 		changed = true;
 	}
@@ -323,7 +399,12 @@ async function ensurePackageJson(packageName) {
 		await writeFile(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`, "utf8");
 		log.ok("package.json");
 	}
-	return addedDeps;
+	for (const { dep, from, to } of upgradedDeps) {
+		log.warn(
+			`bumped ${dep} ${from} -> ${to} — the declared version no longer satisfies the theme`,
+		);
+	}
+	return [...addedDeps, ...upgradedDeps.map((d) => d.dep)];
 }
 
 /** Read the theme's declared peer dependencies. */
@@ -334,6 +415,27 @@ async function themePeers() {
 	} catch {
 		return {};
 	}
+}
+
+/**
+ * Lowest version a range admits, as [major, minor, patch]. Handles the common
+ * caret/tilde/plain forms ("^7.0.0", "~0.34.5", "7", ">=6"); anything
+ * unparseable ("latest", "*", …) is `null` and treated as unknown.
+ */
+function rangeFloor(range) {
+	if (typeof range !== "string") return null;
+	const m = range.match(/(\d+)\.(\d+)(?:\.(\d+))?/);
+	if (!m) return null;
+	return [Number(m[1]), Number(m[2]), Number(m[3] ?? 0)];
+}
+
+/** Whether floor `a` is strictly below floor `b` (null floors are "unknown"). */
+function rangeLower(a, b) {
+	if (!a || !b) return false;
+	for (let i = 0; i < 3; i++) {
+		if (a[i] !== b[i]) return a[i] < b[i];
+	}
+	return false;
 }
 
 /**
@@ -359,6 +461,7 @@ const ROOT_FILES = [
 async function installRootFiles({ force }) {
 	let added = 0;
 	let skipped = 0;
+	let backedUp = 0;
 	for (const entry of ROOT_FILES) {
 		const [srcName, dstName] = Array.isArray(entry) ? entry : [entry, entry];
 		const result = await copyEntry(
@@ -366,14 +469,36 @@ async function installRootFiles({ force }) {
 			join(CWD, dstName),
 			{ force, quiet: true },
 		);
-		if (result.copied) added += 1;
-		else if (result.reason === "exists") skipped += 1;
+		if (result.copied) {
+			added += 1;
+			if (result.saved) backedUp += 1;
+		} else if (result.reason === "exists") skipped += 1;
 	}
 	if (added === 0 && skipped > 0) {
 		log.skip(`root files already present (${skipped} kept)`);
 	} else if (added > 0) {
-		log.ok(`root files (${added} added${skipped ? `, ${skipped} kept` : ""})`);
+		const backupNote = backedUp
+			? `, ${backedUp} previous copies backed up`
+			: "";
+		log.ok(
+			`root files (${added} added${skipped ? `, ${skipped} kept` : ""}${backupNote})`,
+		);
 	}
+}
+
+/** Root files the template ships but the project is currently missing. */
+function missingRootFiles() {
+	const out = [];
+	for (const entry of ROOT_FILES) {
+		const [srcName, dstName] = Array.isArray(entry) ? entry : [entry, entry];
+		if (
+			existsSync(join(TEMPLATE_DIR, srcName)) &&
+			!existsSync(join(CWD, dstName))
+		) {
+			out.push(dstName);
+		}
+	}
+	return out;
 }
 
 /** Pick the package manager from whatever lockfile already exists. */
@@ -382,6 +507,77 @@ function detectPackageManager() {
 	if (existsSync(join(CWD, "yarn.lock"))) return "yarn";
 	if (existsSync(join(CWD, "package-lock.json"))) return "npm";
 	return "pnpm";
+}
+
+/** Detect the installed pnpm outside the user's project metadata. */
+function detectCurrentPnpmVersion() {
+	const probeDir = mkdtempSync(join(tmpdir(), "shirones-pnpm-"));
+	try {
+		const result = spawnSync("pnpm", ["--version"], {
+			cwd: probeDir,
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "ignore"],
+			shell: process.platform === "win32",
+		});
+		return result.status === 0 ? result.stdout.trim() : null;
+	} finally {
+		rmSync(probeDir, { recursive: true, force: true });
+	}
+}
+
+function parsePnpmPin(packageManager) {
+	const match = packageManager?.match(/^pnpm@(.+)$/);
+	return match ? { spec: match[1], display: packageManager } : null;
+}
+
+/**
+ * Run the package manager selected by the published package.
+ *
+ * A matching local pnpm is used directly. A mismatch is deliberately not
+ * handed back to the old pnpm's self-updater: pnpm 10/11 request the obsolete
+ * `@pnpm/linux-x64` package name when the pin is pnpm 12. Corepack is the
+ * normal bootstrap path; when Corepack is not installed, npx runs the pinned
+ * pnpm package directly.
+ */
+function runPinnedPnpm(args, packageManager) {
+	const pin = parsePnpmPin(packageManager);
+	const current = detectCurrentPnpmVersion();
+	if (!pin || current === pin.spec) {
+		return spawnSync("pnpm", args, {
+			cwd: CWD,
+			stdio: "inherit",
+			shell: process.platform === "win32",
+		});
+	}
+
+	const corepack = process.platform === "win32" ? "corepack.cmd" : "corepack";
+	const corepackAvailable =
+		spawnSync(corepack, ["--version"], {
+			stdio: "ignore",
+			shell: process.platform === "win32",
+		}).status === 0;
+	if (corepackAvailable) {
+		log.step(
+			`pnpm ${current ?? "unknown"} differs from ${pin.display}; using Corepack`,
+		);
+		const result = spawnSync(corepack, ["pnpm", ...args], {
+			cwd: CWD,
+			stdio: "inherit",
+			shell: process.platform === "win32",
+		});
+		if (result.status === 0) return result;
+		log.warn(
+			`Corepack was found but failed to run ${pin.display}; trying npx fallback`,
+		);
+	}
+
+	const npx = process.platform === "win32" ? "npx.cmd" : "npx";
+	log.step(`Corepack unavailable; using npx ${pin.display}`);
+	return spawnSync(npx, ["--yes", `pnpm@${pin.spec}`, ...args], {
+		cwd: CWD,
+		stdio: "inherit",
+		shell: process.platform === "win32",
+	});
 }
 
 /**
@@ -393,17 +589,25 @@ function detectPackageManager() {
  */
 async function installDependencies() {
 	const pm = detectPackageManager();
+	const packageManager = await readPackageManager();
 	// pnpm treats a CI environment as `--frozen-lockfile`, and this install
 	// exists precisely because package.json just changed — so opt out.
-	const args = pm === "pnpm" ? ["install", "--no-frozen-lockfile"] : ["install"];
-	log.step(`installing dependencies with ${pm} ${args.slice(1).join(" ")}`);
-	const result = spawnSync(pm, args, {
-		cwd: CWD,
-		stdio: "inherit",
-		shell: process.platform === "win32",
-	});
+	const args =
+		pm === "pnpm" ? ["install", "--no-frozen-lockfile"] : ["install"];
+	const label = pm === "pnpm" && packageManager ? packageManager : pm;
+	log.step(`installing dependencies with ${label} ${args.slice(1).join(" ")}`);
+	const result =
+		pm === "pnpm"
+			? runPinnedPnpm(args, packageManager)
+			: spawnSync(pm, args, {
+					cwd: CWD,
+					stdio: "inherit",
+					shell: process.platform === "win32",
+				});
 	if (result.status !== 0) {
-		log.err(`${pm} install failed — run it manually and check the output above`);
+		log.err(
+			`${label} install failed — run it manually and check the output above`,
+		);
 		process.exitCode = 1;
 		return false;
 	}
@@ -439,7 +643,11 @@ async function ensureTsConfig(packageName, { force }) {
 				paths: desiredPaths,
 			},
 		};
-		await writeFile(tsconfigPath, `${JSON.stringify(tsconfig, null, 2)}\n`, "utf8");
+		await writeFile(
+			tsconfigPath,
+			`${JSON.stringify(tsconfig, null, 2)}\n`,
+			"utf8",
+		);
 		log.ok("tsconfig.json");
 		return;
 	}
@@ -457,8 +665,17 @@ async function ensureTsConfig(packageName, { force }) {
 		}
 	}
 	if (changed) {
-		await writeFile(tsconfigPath, `${JSON.stringify(tsconfig, null, 2)}\n`, "utf8");
-		log.ok("tsconfig.json (theme path aliases)");
+		if (force) await backup("tsconfig.json");
+		await writeFile(
+			tsconfigPath,
+			`${JSON.stringify(tsconfig, null, 2)}\n`,
+			"utf8",
+		);
+		log.ok(
+			force
+				? "tsconfig.json (theme path aliases; previous copy backed up)"
+				: "tsconfig.json (theme path aliases)",
+		);
 	} else {
 		log.skip("tsconfig.json already configured");
 	}
@@ -478,10 +695,29 @@ const BACKUP_DIR = ".shirones-backup";
 /** Move a file out of the way instead of deleting the user's work. */
 async function backup(relativePath) {
 	const from = join(CWD, relativePath);
-	const to = join(CWD, BACKUP_DIR, relativePath);
+	let to = join(CWD, BACKUP_DIR, relativePath);
+	let suffix = 1;
+	while (existsSync(to)) {
+		to = join(CWD, BACKUP_DIR, `${relativePath}.${suffix}`);
+		suffix += 1;
+	}
 	await mkdir(dirname(to), { recursive: true });
 	await rename(from, to);
-	return join(BACKUP_DIR, relativePath);
+	return relative(CWD, to);
+}
+
+/** Replace a directory for --force, preserving the complete previous tree. */
+async function replaceDirectory(from, to) {
+	if (!existsSync(from)) return { copied: false, reason: "missing" };
+	let saved;
+	if (existsSync(to)) saved = await backup(relative(CWD, to));
+	await mkdir(dirname(to), { recursive: true });
+	await cp(from, to, { recursive: true, force: true });
+	const label = relative(CWD, to) || ".";
+	log.ok(
+		saved ? `${label} replaced (--force), kept a copy at ${saved}` : label,
+	);
+	return { copied: true, saved };
 }
 
 /**
@@ -494,7 +730,9 @@ async function backup(relativePath) {
  * is kept as a backup); a config that already wires the theme in is left alone.
  */
 async function ensureAstroConfig(packageName, { force }) {
-	const present = ASTRO_CONFIG_FILENAMES.filter((name) => existsSync(join(CWD, name)));
+	const present = ASTRO_CONFIG_FILENAMES.filter((name) =>
+		existsSync(join(CWD, name)),
+	);
 	const target = join(CWD, "astro.config.mjs");
 
 	for (const name of present) {
@@ -507,7 +745,13 @@ async function ensureAstroConfig(packageName, { force }) {
 		}
 
 		const saved = await backup(name);
-		log.warn(`${name} did not register the theme — kept a copy at ${saved}`);
+		if (wired) {
+			log.ok(
+				`${name} already wires the theme in — replaced with the template (--force), kept a copy at ${saved}`,
+			);
+		} else {
+			log.warn(`${name} did not register the theme — kept a copy at ${saved}`);
+		}
 	}
 
 	await cp(join(TEMPLATE_DIR, "astro.config.mjs"), target, { force: true });
@@ -541,11 +785,11 @@ async function clearStarterFiles() {
 		if (relativePath.endsWith(".astro")) {
 			const contents = await readFile(file, "utf8");
 			const isStarter =
-				contents.includes("Welcome") ||
-				contents.includes("astro.build") ||
-				contents.includes("<slot />");
+				contents.includes("Welcome") || contents.includes("astro.build");
 			if (!isStarter) {
-				log.warn(`${relativePath} is yours — left in place, but it overrides the theme`);
+				log.warn(
+					`${relativePath} is yours — left in place, but it overrides the theme`,
+				);
 				continue;
 			}
 		}
@@ -560,7 +804,9 @@ async function clearStarterFiles() {
 	// A `src/pages/` that still holds routes shadows the theme's own pages.
 	const pagesDir = join(CWD, "src/pages");
 	if (existsSync(pagesDir)) {
-		const leftovers = (await readdir(pagesDir)).filter((name) => !name.startsWith("."));
+		const leftovers = (await readdir(pagesDir)).filter(
+			(name) => !name.startsWith("."),
+		);
 		if (leftovers.length > 0) {
 			log.warn(
 				`src/pages/ still contains ${leftovers.join(", ")} — ` +
@@ -579,7 +825,8 @@ async function listRelative(dir) {
 	for (const entry of await readdir(dir, { withFileTypes: true })) {
 		const full = join(dir, entry.name);
 		if (entry.isDirectory()) {
-			for (const sub of await listRelative(full)) out.push(join(entry.name, sub));
+			for (const sub of await listRelative(full))
+				out.push(join(entry.name, sub));
 		} else {
 			out.push(entry.name);
 		}
@@ -590,7 +837,8 @@ async function listRelative(dir) {
 /** Top-level `export … NAME` declarations in a TypeScript source. */
 function tsExportNames(src) {
 	const names = new Set();
-	const re = /^\s*export\s+(?:const|let|var|function|class|type|interface|enum)\s+([A-Za-z0-9_$]+)/gm;
+	const re =
+		/^\s*export\s+(?:const|let|var|function|class|type|interface|enum)\s+([A-Za-z0-9_$]+)/gm;
 	for (const m of src.matchAll(re)) names.add(m[1]);
 	return names;
 }
@@ -669,6 +917,90 @@ function topKeys(body) {
 	return keys;
 }
 
+/** Top-level field values, normalized only for whitespace, not string content. */
+function topFieldValues(body) {
+	const fields = new Map();
+	let depth = 0;
+	let fieldName = null;
+	let valueStart = -1;
+	let i = 0;
+	const save = (end) => {
+		if (fieldName !== null) {
+			fields.set(
+				fieldName,
+				body.slice(valueStart, end).replace(/\s+/g, " ").trim(),
+			);
+			fieldName = null;
+		}
+	};
+	while (i < body.length) {
+		const ch = body[i];
+		if (ch === '"' || ch === "'" || ch === "`") {
+			i = skipString(body, i) + 1;
+			continue;
+		}
+		if (ch === "/" && body[i + 1] === "/") {
+			while (i < body.length && body[i] !== "\n") i++;
+			continue;
+		}
+		if (ch === "/" && body[i + 1] === "*") {
+			const end = body.indexOf("*/", i + 2);
+			i = end === -1 ? body.length : end + 2;
+			continue;
+		}
+		if (ch === "{" || ch === "[" || ch === "(") {
+			depth++;
+			i++;
+			continue;
+		}
+		if (ch === "}" || ch === "]" || ch === ")") {
+			depth--;
+			i++;
+			continue;
+		}
+		if (depth === 0 && fieldName === null && ch === ":") {
+			let j = i - 1;
+			while (j >= 0 && /\s/.test(body[j])) j--;
+			let k = j;
+			while (k >= 0 && /[A-Za-z0-9_$]/.test(body[k])) k--;
+			const key = body.slice(k + 1, j + 1);
+			if (key && !/^\d+$/.test(key)) {
+				fieldName = key;
+				valueStart = i + 1;
+			}
+		}
+		if (depth === 0 && ch === ",") save(i);
+		i++;
+	}
+	save(body.length);
+	return fields;
+}
+
+/** Values for every `export const NAME = …{…}` object in a source. */
+function objectFieldValues(src) {
+	const fields = new Map();
+	const re = /export\s+const\s+([A-Za-z0-9_$]+)/g;
+	for (const m of src.matchAll(re)) {
+		let open = -1;
+		for (let i = m.index + m[0].length; i < src.length; i++) {
+			const ch = src[i];
+			if (ch === '"' || ch === "'" || ch === "`") {
+				i = skipString(src, i);
+				continue;
+			}
+			if (ch === "{") {
+				open = i;
+				break;
+			}
+		}
+		if (open !== -1) {
+			const body = balancedBody(src, open);
+			if (body !== null) fields.set(m[1], topFieldValues(body));
+		}
+	}
+	return fields;
+}
+
 /**
  * Top-level keys of every `export const NAME = …{…}` object in a source.
  * The declaration may carry a type annotation and wrap the object in a call
@@ -687,7 +1019,7 @@ function objectFieldKeys(src) {
 				i = skipString(src, i);
 				continue;
 			}
-			if (ch === "{" ) {
+			if (ch === "{") {
 				open = i;
 				break;
 			}
@@ -711,6 +1043,8 @@ async function diffConfigFile(tplPath, usrPath) {
 
 	const tplFields = objectFieldKeys(tpl);
 	const usrFields = objectFieldKeys(usr);
+	const tplValues = objectFieldValues(tpl);
+	const usrValues = objectFieldValues(usr);
 	const missingFields = {};
 	for (const [name, keys] of tplFields) {
 		const usr = usrFields.get(name) ?? new Set();
@@ -723,8 +1057,22 @@ async function diffConfigFile(tplPath, usrPath) {
 		const extra = [...keys].filter((k) => !tplSet.has(k));
 		if (extra.length) extraFields[name] = extra;
 	}
+	const changedFields = {};
+	for (const [name, values] of tplValues) {
+		const userValues = usrValues.get(name) ?? new Map();
+		const changed = [...values.keys()].filter(
+			(key) => userValues.has(key) && userValues.get(key) !== values.get(key),
+		);
+		if (changed.length) changedFields[name] = changed;
+	}
 
-	return { missingExports, extraExports, missingFields, extraFields };
+	return {
+		missingExports,
+		extraExports,
+		missingFields,
+		extraFields,
+		changedFields,
+	};
 }
 
 /** Collect the differences between the template config and the user's copy. */
@@ -741,7 +1089,9 @@ async function checkState() {
 	const stale = usrFiles.filter((f) => !tplSet.has(f)).sort();
 
 	const fieldDiffs = [];
-	for (const rel of tplFiles.filter((f) => f.endsWith(".ts") && usrSet.has(f))) {
+	for (const rel of tplFiles.filter(
+		(f) => f.endsWith(".ts") && usrSet.has(f),
+	)) {
 		const diff = await diffConfigFile(
 			join(tplConfig, rel),
 			join(usrConfig, rel),
@@ -750,49 +1100,96 @@ async function checkState() {
 			diff.missingExports.length ||
 			diff.extraExports.length ||
 			Object.keys(diff.missingFields).length ||
-			Object.keys(diff.extraFields).length
+			Object.keys(diff.extraFields).length ||
+			Object.keys(diff.changedFields).length
 		) {
 			fieldDiffs.push({ rel, ...diff });
 		}
 	}
 
-	return { missing, stale, fieldDiffs };
+	return { missing, stale, fieldDiffs, missingRoot: missingRootFiles() };
 }
 
 /**
  * `init` on an already-initialised project: report what drifted from the
- * template (missing files, removed/obsolete files, missing or extra fields)
- * and repair the safe bits — missing files are restored, nothing the user
- * wrote is overwritten.
+ * template (missing files, removed/obsolete files, missing or extra fields).
+ *
+ * By default it only *reports* — nothing is changed. Pass `apply: true`
+ * (the `--update` flag) to repair the safe bits: missing config files are
+ * restored, deleted root files and `public/` assets are re-added, and the
+ * remaining scaffold pieces are brought up to date. Either way nothing the
+ * user wrote is overwritten.
  */
-async function checkAndUpdate(packageName) {
+async function checkAndUpdate(packageName, { apply }) {
 	const usrConfig = join(CWD, CONTENT_ROOT, "config");
-	const { missing, stale, fieldDiffs } = await checkState();
+	const { missing, stale, fieldDiffs, missingRoot } = await checkState();
 
 	const clean =
-		missing.length === 0 && stale.length === 0 && fieldDiffs.length === 0;
+		missing.length === 0 &&
+		stale.length === 0 &&
+		fieldDiffs.length === 0 &&
+		missingRoot.length === 0;
 
 	if (clean) {
-		console.log(`\n${colours.green}${colours.bold}Up to date.${colours.reset}\n`);
+		console.log(
+			`\n${colours.green}${colours.bold}Up to date.${colours.reset}\n`,
+		);
+		if (!apply) return;
 	} else {
-		console.log(`\n${colours.bold}Found ${missing.length + stale.length + fieldDiffs.length} difference(s) from the template:${colours.reset}\n`);
+		const total =
+			missing.length + stale.length + fieldDiffs.length + missingRoot.length;
+		console.log(
+			`\n${colours.bold}Found ${total} difference(s) from the template:${colours.reset}\n`,
+		);
 
 		if (missing.length) {
-			log.warn(`${missing.length} file(s) missing from ${CONTENT_ROOT}/config/`);
-			for (const f of missing) console.log(`    ${colours.dim}− ${f}${colours.reset}`);
+			log.warn(
+				`${missing.length} file(s) missing from ${CONTENT_ROOT}/config/`,
+			);
+			for (const f of missing)
+				console.log(`    ${colours.dim}− ${f}${colours.reset}`);
+		}
+		if (missingRoot.length) {
+			log.warn(
+				`${missingRoot.length} root file(s) missing: ${missingRoot.join(", ")}`,
+			);
 		}
 		if (stale.length) {
-			log.warn(`${stale.length} file(s) no longer exist in the template (kept)`);
-			for (const f of stale) console.log(`    ${colours.dim}− ${f}${colours.reset}`);
+			log.warn(
+				`${stale.length} file(s) no longer exist in the template (kept)`,
+			);
+			for (const f of stale)
+				console.log(`    ${colours.dim}− ${f}${colours.reset}`);
 		}
 		for (const d of fieldDiffs) {
-			log.warn(`${join(CONTENT_ROOT, "config", d.rel)} differs from the template`);
-			for (const n of d.missingExports) console.log(`    ${colours.dim}− missing export: ${n}${colours.reset}`);
-			for (const n of d.extraExports) console.log(`    ${colours.dim}− extra export (yours): ${n}${colours.reset}`);
+			log.warn(
+				`${join(CONTENT_ROOT, "config", d.rel)} differs from the template`,
+			);
+			for (const n of d.missingExports)
+				console.log(`    ${colours.dim}− missing export: ${n}${colours.reset}`);
+			for (const n of d.extraExports)
+				console.log(
+					`    ${colours.dim}− extra export (yours): ${n}${colours.reset}`,
+				);
 			for (const [name, keys] of Object.entries(d.missingFields))
-				console.log(`    ${colours.dim}− ${name}: missing field(s): ${keys.join(", ")}${colours.reset}`);
+				console.log(
+					`    ${colours.dim}− ${name}: missing field(s): ${keys.join(", ")}${colours.reset}`,
+				);
 			for (const [name, keys] of Object.entries(d.extraFields))
-				console.log(`    ${colours.dim}− ${name}: field(s) not in template: ${keys.join(", ")}${colours.reset}`);
+				console.log(
+					`    ${colours.dim}− ${name}: field(s) not in template: ${keys.join(", ")}${colours.reset}`,
+				);
+			for (const [name, keys] of Object.entries(d.changedFields))
+				console.log(
+					`    ${colours.dim}− ${name}: value(s) changed: ${keys.join(", ")}${colours.reset}`,
+				);
+		}
+
+		if (!apply) {
+			console.log(
+				`\n${colours.dim}Nothing was changed. Run \`npx shirones init --update\` to restore the missing files and refresh the scaffold.${colours.reset}\n`,
+			);
+			return;
 		}
 
 		// Restore missing files (never touch the user's own files).
@@ -805,32 +1202,45 @@ async function checkAndUpdate(packageName) {
 					{ force: false, quiet: true },
 				);
 			}
-			log.ok(`${missing.length} file(s) restored under ${CONTENT_ROOT}/config/`);
+			log.ok(
+				`${missing.length} file(s) restored under ${CONTENT_ROOT}/config/`,
+			);
 		}
 	}
 
 	// The remaining pieces are idempotent: they only add what is missing.
+	// Run on `--update` even when the config is clean, so deleted root files,
+	// public assets and `src/icons/` come back too.
 	await ensureAstroConfig(packageName, { force: false });
 	await copyEntry(
 		join(TEMPLATE_DIR, "src/content.config.ts"),
 		join(CWD, "src/content.config.ts"),
 		{ force: false },
 	);
+	await mergeDirectory(join(TEMPLATE_DIR, "public"), join(CWD, "public"), {
+		force: false,
+	});
+	await mkdir(join(CWD, "src/icons"), { recursive: true });
+	await installRootFiles({ force: false });
 	await ensureTsConfig(packageName, { force: false });
-	const addedDeps = await ensurePackageJson(packageName);
+	const addedDeps = await ensurePackageJson(packageName, {
+		syncPackageManager: true,
+	});
 	await ensurePnpmWorkspace();
 
 	if (addedDeps.length > 0) {
-		await installDependencies();
+		if (!(await installDependencies())) return;
 	} else {
 		log.skip("dependencies already declared");
 	}
 
-	if (!clean) console.log(`\n${colours.green}${colours.bold}Done.${colours.reset}\n`);
+	if (!clean)
+		console.log(`\n${colours.green}${colours.bold}Done.${colours.reset}\n`);
 }
 
 async function init(args) {
 	const force = args.includes("--force") || args.includes("-f");
+	const apply = args.includes("--update") || args.includes("-u");
 	const packageName = await readPackageName();
 
 	if (!existsSync(TEMPLATE_DIR)) {
@@ -842,23 +1252,47 @@ async function init(args) {
 		return;
 	}
 
-	// Already initialised? Report drift from the template and repair the safe
-	// bits instead of re-scaffolding (never overwrites the user's files).
+	// Already initialised? Report drift from the template instead of
+	// re-scaffolding; `--update` repairs the safe bits (never overwrites the
+	// user's files).
 	if (existsSync(join(CWD, CONTENT_ROOT)) && !force) {
-		return checkAndUpdate(packageName);
+		return checkAndUpdate(packageName, { apply });
 	}
 
-	console.log(`\n${colours.bold}Shirone${colours.reset} · initialising project\n`);
+	console.log(
+		`\n${colours.bold}Shirone${colours.reset} · initialising project`,
+	);
 
 	// 1. Content + configuration.
-	await copyEntry(join(TEMPLATE_DIR, CONTENT_ROOT), join(CWD, CONTENT_ROOT), { force });
+	//
+	// `--force` means exactly what it says: replace the template-owned tree.
+	// Move the complete old tree first so the user can recover any content or
+	// config they want from `.shirones-backup/`.
+	if (force) {
+		await replaceDirectory(
+			join(TEMPLATE_DIR, CONTENT_ROOT),
+			join(CWD, CONTENT_ROOT),
+		);
+	} else {
+		await mergeDirectory(
+			join(TEMPLATE_DIR, CONTENT_ROOT),
+			join(CWD, CONTENT_ROOT),
+			{ force: false },
+		);
+	}
 
-	// 2. Static assets (favicons, banners, demo images). Merged rather than
-	// copied wholesale: the starter project already owns a `public/`.
-	await mergeDirectory(join(TEMPLATE_DIR, "public"), join(CWD, "public"), { force });
+	// 2. Static assets (favicons, banners, demo images). A force refresh also
+	// replaces the complete template tree, after backing up the old public dir.
+	if (force) {
+		await replaceDirectory(join(TEMPLATE_DIR, "public"), join(CWD, "public"));
+	} else {
+		await mergeDirectory(join(TEMPLATE_DIR, "public"), join(CWD, "public"), {
+			force: false,
+		});
+	}
 
 	// 2b. Project root files (.env.example, .gitignore, README, editor hints, …).
-	// Installed without clobbering anything the user already has.
+	// A forced replacement is backed up by copyEntry; ordinary init never clobbers.
 	await installRootFiles({ force });
 
 	// 3. Astro entry files.
@@ -884,19 +1318,26 @@ async function init(args) {
 	// 6. If package.json was created or gained dependencies, install them now —
 	//    that is what lets `init` work from a completely empty directory.
 	if (addedDeps.length > 0) {
-		await installDependencies();
+		if (!(await installDependencies())) return;
 	} else {
 		log.skip("dependencies already declared");
 	}
 
 	const postCount = await countFiles(join(CWD, CONTENT_ROOT, "content/posts"));
+	const packageManager = await readPackageManager();
+	const pin = parsePnpmPin(packageManager);
+	const nextCommands = pin
+		? `  ${colours.dim}pnpm dev${colours.reset}
+  ${colours.dim}If that fails: corepack pnpm dev${colours.reset}
+  ${colours.dim}If that also fails: npx --yes pnpm@${pin.spec} dev${colours.reset}`
+		: `  ${colours.dim}pnpm dev${colours.reset}`;
 
 	console.log(`
 ${colours.green}${colours.bold}Done.${colours.reset} ${postCount} example content files installed.
 
 ${colours.bold}Project layout${colours.reset}
   astro.config.mjs          the only Astro config
-  src/content.config.ts     collection definitions
+  src/content.config.ts     inline collection schemas (postSchema, momentSchema, specSchema)
   src/components/           drop a file here to override a theme component
   src/layouts/              …same for layouts
   ${CONTENT_ROOT}/config/            site configuration (TypeScript, fully typed)
@@ -905,23 +1346,174 @@ ${colours.bold}Project layout${colours.reset}
   public/                   static assets
 
 ${colours.bold}Next${colours.reset}
-  ${colours.dim}pnpm dev${colours.reset}
+${nextCommands}
 `);
 }
 
+async function readJsonFile(path) {
+	try {
+		return JSON.parse(await readFile(path, "utf8"));
+	} catch {
+		return null;
+	}
+}
+
 async function info() {
+	const packageJsonPath = join(PACKAGE_ROOT, "package.json");
 	const packageName = await readPackageName();
+	const packageMeta = await readJsonFile(packageJsonPath);
+	const templatePresent = existsSync(TEMPLATE_DIR);
+	const initialized = existsSync(join(CWD, CONTENT_ROOT));
+	const projectMeta = await readJsonFile(join(CWD, "package.json"));
+	const manifest = await readJsonFile(join(PACKAGE_ROOT, "manifest.json"));
+	const buildInfo = await readJsonFile(join(PACKAGE_ROOT, "build-info.json"));
 	const pagesDir = join(PACKAGE_ROOT, "src/pages");
+	const tplConfigDir = join(TEMPLATE_DIR, CONTENT_ROOT, "config");
+	const tplDataDir = join(tplConfigDir, "data");
 
-	console.log(`\n${colours.bold}${packageName}${colours.reset}`);
-	console.log(`  package root : ${PACKAGE_ROOT}`);
-	console.log(`  template     : ${existsSync(TEMPLATE_DIR) ? "present" : colours.red + "MISSING" + colours.reset}`);
-	console.log(`  project      : ${CWD}`);
-	console.log(`  content dir  : ${join(CWD, CONTENT_ROOT)} ${existsSync(join(CWD, CONTENT_ROOT)) ? colours.green + "✓" + colours.reset : colours.yellow + "(not initialised)" + colours.reset}`);
+	const countImmediateTs = async (dir) => {
+		if (!existsSync(dir)) return 0;
+		const entries = await readdir(dir, { withFileTypes: true });
+		return entries.filter(
+			(entry) => entry.isFile() && entry.name.endsWith(".ts"),
+		).length;
+	};
+	const configModules = await countImmediateTs(tplConfigDir);
+	const dataModules = await countImmediateTs(tplDataDir);
+	const countFromManifest = (key, fallback = 0) =>
+		Number.isFinite(manifest?.counts?.[key]) ? manifest.counts[key] : fallback;
+	const routes = countFromManifest("routes", await countFiles(pagesDir));
+	const components = countFromManifest("components");
+	const layouts = countFromManifest("layouts");
+	const manifestConfig = countFromManifest("config", configModules);
+	const manifestData = countFromManifest("data", dataModules);
 
-	if (existsSync(pagesDir)) {
-		const count = await countFiles(pagesDir);
-		console.log(`  routes       : ${count} page modules`);
+	const contentDir = join(CWD, CONTENT_ROOT, "content");
+	const posts = await countFiles(join(contentDir, "posts"));
+	const moments = await countFiles(join(contentDir, "moments"));
+	const contentFiles = await countFiles(contentDir);
+	const publicFiles = await countFiles(join(CWD, "public"));
+	const backupDir = join(CWD, BACKUP_DIR);
+	const backupFiles = await countFiles(backupDir);
+	const packageDependency =
+		projectMeta?.dependencies?.[packageName] ??
+		projectMeta?.devDependencies?.[packageName] ??
+		"not declared";
+	const declaredManager = projectMeta?.packageManager ?? "not pinned";
+	const detectedManager = detectPackageManager();
+	const engine = packageMeta?.engines?.node ?? "not declared";
+	const nodeMatch = engine.match(/>=\s*(\d+)\.(\d+)(?:\.(\d+))?/);
+	const currentNode = process.versions.node.split(".").map(Number);
+	const nodeOkay = nodeMatch
+		? currentNode[0] > Number(nodeMatch[1]) ||
+			(currentNode[0] === Number(nodeMatch[1]) &&
+				(currentNode[1] > Number(nodeMatch[2]) ||
+					(currentNode[1] === Number(nodeMatch[2]) &&
+						currentNode[2] >= Number(nodeMatch[3] ?? 0))))
+		: null;
+	const nodeStatus =
+		nodeOkay === null
+			? ""
+			: nodeOkay
+				? ` ${colours.green}✓${colours.reset}`
+				: ` ${colours.red}✗${colours.reset}`;
+	const row = (label, value) => console.log(`  ${label.padEnd(20)}${value}`);
+	const section = (title) =>
+		console.log(`\n${colours.bold}${title}${colours.reset}`);
+	const listPreview = (label, values) => {
+		if (values.length === 0) return;
+		const preview = values.slice(0, 4).join(", ");
+		const more = values.length > 4 ? ` (+${values.length - 4} more)` : "";
+		console.log(
+			`    ${colours.dim}${label}: ${preview}${more}${colours.reset}`,
+		);
+	};
+
+	console.log(`\n${colours.bold}Shirone project info${colours.reset}`);
+	section("Package");
+	row(
+		"package",
+		`${packageName}${packageMeta?.version ? ` v${packageMeta.version}` : ""}`,
+	);
+	row("package root", PACKAGE_ROOT);
+	row(
+		"template",
+		templatePresent
+			? `${colours.green}present${colours.reset}`
+			: `${colours.red}MISSING${colours.reset}`,
+	);
+	row(
+		"manifest",
+		manifest
+			? `${colours.green}present${colours.reset}`
+			: `${colours.yellow}not available${colours.reset}`,
+	);
+	row(
+		"upstream",
+		buildInfo?.upstreamSha
+			? `${buildInfo.upstreamRef ?? "ref"}@${buildInfo.upstreamSha.slice(0, 12)}`
+			: "not recorded",
+	);
+	row(
+		"built",
+		buildInfo?.builtAt
+			? `${buildInfo.builtAt} (${buildInfo.node ?? "Node unknown"})`
+			: "not recorded",
+	);
+	row("Node", `${process.version} / requires ${engine}${nodeStatus}`);
+
+	section("Project");
+	row("project root", CWD);
+	row(
+		"status",
+		initialized
+			? `${colours.green}initialised${colours.reset}`
+			: `${colours.yellow}not initialised${colours.reset}`,
+	);
+	row("package dependency", packageDependency);
+	row("package manager", `${detectedManager} (project: ${declaredManager})`);
+	row(
+		"content",
+		`${join(CWD, CONTENT_ROOT)} (${contentFiles} files; ${posts} posts, ${moments} moments)`,
+	);
+	row("public", `${publicFiles} files`);
+	row("backup", backupFiles ? `${backupFiles} files in ${backupDir}` : "none");
+
+	section("Theme inventory");
+	row("routes", `${routes} page modules`);
+	row("components", `${components} overridable components`);
+	row("layouts", `${layouts} overridable layouts`);
+	row("config", `${manifestConfig} default modules`);
+	row("data", `${manifestData} data modules`);
+
+	if (!initialized) {
+		console.log(
+			`\n${colours.dim}Run \`npx shirones init\` to scaffold this project.${colours.reset}\n`,
+		);
+		return;
+	}
+
+	const drift = await checkState();
+	const total =
+		drift.missing.length +
+		drift.stale.length +
+		drift.fieldDiffs.length +
+		drift.missingRoot.length;
+	section("Drift");
+	if (total === 0) {
+		row("status", `${colours.green}up to date${colours.reset}`);
+	} else {
+		row("status", `${colours.yellow}${total} difference(s)${colours.reset}`);
+		listPreview("missing config", drift.missing);
+		listPreview("stale files kept", drift.stale);
+		listPreview(
+			"changed config",
+			drift.fieldDiffs.map((item) => item.rel),
+		);
+		listPreview("missing root", drift.missingRoot);
+		console.log(
+			`    ${colours.dim}Run \`npx shirones init --update\` to restore safe missing files.${colours.reset}`,
+		);
 	}
 	console.log();
 }
@@ -930,13 +1522,17 @@ function help() {
 	console.log(`
 ${colours.bold}Shirone CLI${colours.reset}
 
-  ${colours.cyan}init${colours.reset} [--force]   Scaffold the project — or check an existing one for drift (missing/obsolete files, fields)
-  ${colours.cyan}info${colours.reset}             Show resolved paths and package status
-  ${colours.cyan}help${colours.reset}             Show this message
+  ${colours.cyan}init${colours.reset}                 Scaffold the project — or report drift on an existing one
+  ${colours.cyan}init${colours.reset} ${colours.dim}--update${colours.reset}        Restore missing files and refresh the scaffold (never overwrites your files)
+  ${colours.cyan}init${colours.reset} ${colours.dim}--force${colours.reset}         Replace template files after backing up the previous copy
+  ${colours.cyan}info${colours.reset}                 Detailed status and drift report
+  ${colours.cyan}help${colours.reset}                 Show this message
 `);
 }
 
 const [command = "help", ...args] = process.argv.slice(2);
+
+await printCliNotice();
 
 switch (command) {
 	case "init":

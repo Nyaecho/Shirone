@@ -35,20 +35,23 @@ Shirone is a blog theme built with Astro 7, Svelte 5, Tailwind 4, Stylus, and pn
 - `docs/npm-package-mode.md` — how the theme behaves when installed as the `shirones` package (config paths, content root, init).
 - `docs/packaging-contract.md` — the two-mode contract every theme change must respect; see `rules/project-rules.md` §12 for the sync checklist.
 - `docs/ai-skills-maintenance.md` — required for the skills/project documentation split and release checklist.
-- The nearest nested `AGENTS.md` — local rules are additive and narrower than this file.
+- The nearest nested `AGENTS.md` — local rules are additive and narrower than this file. The page-scope file is intentionally named `src/pages/_AGENTS.md`; the leading underscore keeps Astro from treating it as a route.
 - `.agents/skills/README.md` — task-scoped AI skills for developers and theme users; consult the matching skill (and keep its content in sync) when working in its domain.
 
 ## Validation
 
 - Common commands: `pnpm.cmd astro dev --port 4321`, `npx.cmd astro check`, `npx.cmd playwright test tests/site/<spec>.spec.ts`, `pnpm.cmd check:manifest`, `pnpm.cmd exec biome ci ./src`, `pnpm.cmd type-check`, and `pnpm.cmd build`.
 - `pnpm.cmd lint` and `pnpm.cmd format` include `--write`; do not use them as read-only review checks. Use `pnpm.cmd exec biome ci ./src` when validation must not modify files.
+- `pnpm.cmd type-check` runs `tsc` with `--isolatedDeclarations` and filters exactly one known exception: the four `TS9013` errors on the `collections` entries in `src/content.config.ts`. `defineCollection` is generic, so declaration emit cannot name each entry's type, and `tsconfig.json` `exclude` does not help because `.astro/content.d.ts` pulls the file back in through `typeof import(...)`. Annotating `collections` does not work either — it either re-references the unnamed consts or erases the per-collection schema types, which turns every `post.data` into `unknown`. Every other error fails the build.
+- `pnpm.cmd check:package-manifest` fails when `src/` imports a package that only `dependencies` and `peerDependencies` can satisfy at runtime, or that `extraDependencies` does not ship. It is the only guard against a bare import that builds fine in this repo (devDependencies are installed here) and fails in a user's project after install, so run it before publishing or moving code into the integration. Side-effect imports in `*.d.ts` are skipped: declaration files are never emitted.
+- Neither `type-check` nor `check:package-manifest` runs in `ci.yml` — the maintainer kept that workflow's step list identical to `origin/main` because it triggers on every pull request. Both still need to pass before a release; `d3d3398` is the commit where the manifest check caught a real defect (`@swup/scroll-plugin` in `devDependencies` backing `smoothScrolling: true`).
 - Run the smallest relevant Playwright fragment plus `tests/site/a11y.spec.ts` for page/component changes. Run album, icon, or motion fragments when those domains change. The visual suite uses local snapshots that are ignored by Git; update them only after confirming every difference is intentional, and do not absorb unrelated page-height or environment drift.
 - If Stylus/Svelte changes appear stale in dev, clear `node_modules/.vite` and `.astro` and restart. If a Markdown/rehype/remark change appears stale, clear `.astro/data-store.json` and restart.
 - Wait for theme initialization (`--mc-primary`) and `onload-animation` convergence before asserting computed styles or running accessibility checks.
 
 ## Repository context
 
-- Sidebar configuration flows from `src/config/sidebarConfig.ts` through the `componentMap` registry in `src/components/organisms/SideBar.astro` to widget rendering. `SidebarPage` in `src/types/sidebarConfig.ts` is authoritative for page identifiers (`home`, `archive`, `friends`, `moments`, `anime`, `compass`, `albums`, `about`, `categories`, `tags`, `post`). The `pages` filter reads `data-current-page` from `#swup-container` on SSR and after Swup replacement.
+- Sidebar configuration flows from `src/config/sidebarConfig.ts` through the `componentMap` registry in `src/components/organisms/SideBar.astro` to widget rendering. `SidebarPage` in `src/types/sidebarConfig.ts` is authoritative for page identifiers (`notFound`, `home`, `archive`, `friends`, `moments`, `anime`, `compass`, `skills`, `projects`, `devices`, `games`, `timeline`, `albums`, `about`, `categories`, `tags`, `rss`, `atom`, `post`). The `pages` filter reads `data-current-page` from `#swup-container` on SSR and after Swup replacement.
 - Motion primitives live in `src/utils/motion.ts` (`fadeOutThenHide`, `flipFromRect`, `revealIn`, `collapse`); `prefersReducedMotion()` must be honored.
 - Atom inventory and count are authoritative only in `src/components/atoms/manifest.json`; do not maintain a second hard-coded count in instructions or prose.
 - Canonical page templates are under `src/layouts/`; `src/components/layout/` is not a parallel template layer.
