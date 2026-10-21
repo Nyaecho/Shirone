@@ -1,0 +1,33 @@
+---
+/** 健康数据页：静态模板 + 运行时取数（配置管行为，数据由浏览器 hydrate 后拉取）。 */
+import HealthSection from "@components/organisms/HealthSection.svelte";
+import I18nKey from "@i18n/i18nKey";
+import MainGridLayout from "@layouts/MainGridLayout.astro";
+import { resolveI18nText } from "@utils/i18n-utils";
+import { healthConfig } from "@/config/healthConfig";
+
+if (!healthConfig.enable) {
+	return Astro.redirect("/404/");
+}
+
+const pageTitle = resolveI18nText(healthConfig.title, I18nKey.health);
+const pageDescription = resolveI18nText(
+	healthConfig.description,
+	I18nKey.healthBanner,
+);
+---
+
+<MainGridLayout
+	title={pageTitle}
+	description={pageDescription}
+	page="health"
+>
+	<HealthSection
+		apiBase={healthConfig.apiBase}
+		cards={healthConfig.cards}
+		fetchTimeoutMs={healthConfig.fetchTimeoutMs}
+		title={pageTitle}
+		subtitle={pageDescription}
+		client:visible
+	/>
+</MainGridLayout>

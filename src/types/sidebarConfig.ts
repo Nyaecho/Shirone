@@ -39,6 +39,7 @@ export type SidebarPage =
 	| "devices" // 设备展示
 	| "games" // 游戏展示
 	| "timeline" // 时间线
+	| "health" // 运动健康
 	| "albums" // 相册
 	| "about" // 关于
 	| "categories" // 分类索引

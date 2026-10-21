@@ -42,6 +42,7 @@ export {
 export { footerConfig } from "./footerConfig";
 export { friendsConfig } from "./friendsConfig";
 export { gamesConfig } from "./gamesConfig";
+export { healthConfig } from "./healthConfig";
 export { i18nConfig } from "./i18nConfig";
 export {
 	imageBloomConfig,

@@ -7,6 +7,7 @@ import { compassConfig } from "@/config/compassConfig";
 import { devicesConfig } from "@/config/devicesConfig";
 import { friendsConfig } from "@/config/friendsConfig";
 import { gamesConfig } from "@/config/gamesConfig";
+import { healthConfig } from "@/config/healthConfig";
 import { momentsConfig } from "@/config/momentsConfig";
 import { projectsConfig } from "@/config/projectsConfig";
 import { seriesConfig } from "@/config/seriesConfig";
@@ -98,6 +99,12 @@ export const LinkPresets: Record<string, NavBarLink> = {
 		icon: "material-symbols:timeline-rounded",
 		pageKey: "timeline",
 	},
+	Health: {
+		name: i18n(I18nKey.health),
+		url: "/health/",
+		icon: "material-symbols:monitor-heart-outline-rounded",
+		pageKey: "health",
+	},
 	Albums: {
 		name: i18n(I18nKey.albums),
 		url: "/albums/",
@@ -151,6 +158,7 @@ const defaultNavBarConfig: NavBarConfig = {
 			icon: "material-symbols:apps-rounded",
 			children: [
 				LinkPresets.Timeline,
+				LinkPresets.Health,
 				LinkPresets.Projects,
 				LinkPresets.Devices,
 				LinkPresets.Games,
@@ -193,6 +201,7 @@ const unavailableFeatureRoutes: ReadonlySet<string> = new Set([
 	...(devicesConfig.enable ? [] : ["/devices"]),
 	...(gamesConfig.enable ? [] : ["/games"]),
 	...(timelineConfig.enable ? [] : ["/timeline"]),
+	...(healthConfig.enable ? [] : ["/health"]),
 	...(aboutConfig.enable ? [] : ["/about"]),
 	...(seriesConfig.enable ? [] : ["/series"]),
 ]);
