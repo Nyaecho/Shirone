@@ -8,14 +8,17 @@
 浏览器 /health/ 页（Svelte 岛 hydrate）
   │ fetch apiBase/snapshot（默认 /blog-admin/api/health，经 nginx 同域反代）
   ▼
-shirone-admin :3777（仅回环监听）routes/health.js
-  │ node:sqlite 只读直查 mihealth.db（dedup 表）
-  ▼
-mihealth-api sync.py incremental --prune-days 7（服务器 cron 每小时）
-  ▼
-小米云端
+shirone-admin :3777（仅回环监听）
+  ├─ routes/health.js    公开只读快照（node:sqlite 直查 mihealth.db 的 dedup 表）
+  └─ lib/mihealth-sync.js 数据同步（进程内定时器每小时）
+       │  水位流增量 + 72h 时间窗补拉；401 自动免密续期（凭证热更新重试）
+       ▼
+     小米云端
 ```
 
+- 数据同步、凭证部署、凭证续期**全部内置于 shirone-admin 单进程**（自 mihealth-api
+  完整移植，库结构同构可互换）：`.env` 配 `MIHEALTH_DB` → 向导上传凭证 →
+  自动建库、自动全量回填、每小时自动增量，零 cron 零 Python；
 - 快照契约见 shirone-admin `lib/mihealth.js` 头注：近 N 天步数（站点时区日历日聚合）、24h 心率/压力序列（降采样+统计）、近 N 晚睡眠（主会话摘要 + 全部会话 + 最近一夜分期）；
 - 统计天数由服务端 `MIHEALTH_DAYS` 决定，前端零可变参数；
 - 接口缓存 60s + stale-while-revalidate，库不可用时降级返回旧快照。
@@ -54,4 +57,6 @@ mihealth-api sync.py incremental --prune-days 7（服务器 cron 每小时）
 ## 测试
 
 - `tests/site/health.spec.ts`：壳层标识 + 就绪/离线互斥断言（不依赖运行时 API）；
-- 数据链路联调：shirone-admin `scripts/test-mihealth.mjs`（mock 库全链路 27 项断言）。
+- 数据链路联调：shirone-admin `scripts/test-mihealth.mjs`（mock 库全链路 27 项断言）；
+- 同步链路：shirone-admin `lib/mihealth-client.js`（Node 移植版与 mihealth-api Python
+  客户端同 token 同窗口结果一致）与 `lib/mihealth-sync.js`（真实凭证回填/增量实测）。
