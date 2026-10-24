@@ -1,0 +1,5066 @@
+# Nyaechoのblog - Full Content Archive
+
+> Generated on 2026-10-24. Contains full text of all public articles for LLM ingestion.
+
+---
+
+## LInux如何免密连接ssh并配置免密sudo
+
+- **URL**: https://neecoo.dpdns.org/2026-10-linux-ssh-sudo/
+- **Published**: 2026-10-23
+- **Category**: 教程
+- **Tags**: 学习, 经验, linux
+- **Description**: 为了方便ai在本地直接ssh操作远程机器，本教程将将教导如何配置免密ssh连接和免密sudo
+
+## 效果展示
+
+## 创建密钥对实现免密连接
+
+### 1、生成密钥对
+
+> 免密登录的本质是把密码认证的步骤用一对密钥自动验证，类似人脸识别或者指纹识别，减少了人为介入的动作。
+
+```bash
+ssh-keygen -t ed25519 -C "你的注释或邮箱"
+```
+然后会出现
+
+```cmd
+PS F:\新建文件夹> ssh-keygen -t ed25519 -C "kali"
+Generating public/private ed25519 key pair.
+Enter file in which to save the key (C:\Users\17769/.ssh/id_ed25519): C:\Users\17769\.ssh\kali
+Enter passphrase (empty for no passphrase):
+Enter same passphrase again:
+Your identification has been saved in C:\Users\17769\.ssh\kali
+Your public key has been saved in C:\Users\17769\.ssh\kali.pub
+The key fingerprint is:
+SHA256:wAbj5z5HKmeLSR5mAsnG19CoDSt+luqG+kpHWp9Rk0g kali
+The key's randomart image is:
++--[ED25519 256]--+
+|    oE           |
+|   .++. .        |
+| . o.o=+         |
+|o.= o+...        |
+|+* = o. S        |
+|+.= o.oo         |
+|.+.=*o* .        |
+|o.=* B +         |
+|*=. + .          |
++----[SHA256]-----+
+```
+
+![1023-5c5c62c5.png](./1023-5c5c62c5.png)
+
+其中第1行是敲入的生成密钥对的命令，第3行是询问密钥对文件放在哪，并给出了一个默认位置和默认名，**注意！** *这里如果不改默认路径，生成出来的名称是默认的，如果  .ssh 下有其他时候生成的密钥对文件，会将其覆盖掉，此时旧密钥无法找回，所以最好自定义路径，甚至可以生成后自己重命名，但是小心不要对旧密钥文件进行覆盖。* 第4行是密码短语，属于私钥文件的一把锁，用于防止私钥文件泄露被他人使用，不过个人使用密钥对完全不需要如此谨慎，所以置空即可；
+
+### 2、将密钥对中公钥部分部署到需要被连接的服务器
+
+生成的密钥对文件有两个，一个是公钥一个是私钥，其中公钥用于加密数据，私钥用于解密数据，运用非对称加密特性，公钥加密后的数据无法被公钥本身解开。
+
+这里有两种办法配置公钥，分别是自动复制和手动复制
+
+#### 自动复制
+
+在终端敲入命令
+
+```bash
+#示例 ssh-copy-id -i <公钥文件的本机地址> <用户名@服务器地址>
+ssh-copy-id -i ~/.ssh/kali.pub kali@192.168.122.128
+```
+
+然后输入一次登录密码，就能够自动完成配置。
+
+但是这需要本机有 ssh-copy-id 工具（比如从windows上连接linux），如果没有就需要手动配置
+
+#### 手动复制
+
+这里需要先说明 系统是如何信任一个公钥
+
+在 `/etc/ssh/sshd_config` 文件中，是管理 SSH 服务端的监听、认证、授权、访问控制和会话功能，是决定“谁能以什么方式登录这台机器”的核心配置文件。具体的配置文件内容分析放在文章末尾。根据默认配置，我们应该将公钥写入文件 `~/.ssh/authorized_keys` 内，所以我们这里应该运行如下命令：
+
+```bash
+# 先保证目录存在且如果不存在自动创建
+mkdir -p ~/.ssh
+#确保有写入权限
+chmod 700 ~/.ssh
+# 将公钥内容追加到文件中
+echo "<公钥内容>” >>  ~/.ssh/authorized_keys
+
+#设置authorized_keys文件的权限（原因见下方分析config文件）
+chmod 600 ~/.ssh/authorized_keys
+```
+
+这个公钥内容需要自行找到文件内容进行复制
+
+![1023-9ba1a47c.png](./1023-9ba1a47c.png)
+
+![1023-c0d70fb7.png](./1023-c0d70fb7.png)
+
+### 3、配置本地ssh连接时自动使用公钥连接
+
+在本机的 `~/.ssh/config` 中配置连接时使用的私钥
+
+![1023-812efb8f.png](./1023-812efb8f.png)
+
+```txt
+Host kali <- 这里是连接是使用的别名，爱取什么取什么
+	HostName 192.168.122.128 <- 服务器的IP地址
+	User kali <- 连接登录时使用的用户名
+	IdentityFile ~/.ssh/kali <- 使用的私钥文件路径，确保和公钥是配对的
+	IdentitiesOnly yes <- 用来明确说明“不要尝试其他私钥，就用我配置的私钥文件”
+```
+
+### 4、连接测试
+此时，公私钥都配置完成，使用别名进行ssh连接就不再需要密码了
+
+![1023-ca54c13e.png](./1023-ca54c13e.png)
+
+## 配置免密sudo
+
+### 过程
+
+/etc/sudoers 文件是 Linux/Unix 系统中 sudo 命令的核心策略配置文件。它定义了一套规则，精确地回答了一个问题：“谁（Which user），可以在哪台主机上（Which host），以谁的身份（As which user），执行哪些命令（Which command）”。
+
+如果没有这个文件，sudo 就不知道任何授权信息，也就无法工作。在配置之前，你需要知道：
+**⚠️ 永远用 visudo 来编辑
+绝对不要直接用 vim、nano 等编辑器打开 /etc/sudoers 文件。这是一个语法极其严格的文件，一个拼写错误就可能导致所有用户（包括 root）永久失去 sudo 权限，从而将系统锁死。**
+
+正确的方法是使用 visudo 命令。它专为此设计，提供了关键保护：
+
+1. 文件锁：防止多人同时编辑造成冲突。
+
+2. 语法检查：在保存前自动检查语法。如果发现错误，它会提示你并拒绝保存，从而避免配置被破坏。
+
+3. 原子写入：安全地替换原文件。
+
+直接使用 `visudo` 会进入编辑sudoer 文件的编辑，通常会有一行 #includedir /etc/sudoers.d。这意味着系统会自动读取 /etc/sudoers.d/ 目录下所有文件的配置。因此，推荐将自定义的授权规则分别存放在这个目录下的独立文件中。例如，为部署用户创建一个专门的规则文件：/etc/sudoers.d/deploy-user。
+
+这样做的好处是：配置清晰、易于管理，并且更新系统或升级 sudo 时，你的自定义规则不会被覆盖。同样，编辑这些文件也应使用 visudo -f 命令，例如：sudo visudo -f /etc/sudoers.d/deploy-user。
+
+![1023-c47ecc49.png](./1023-c47ecc49.png)
+
+所以可以通过以下命令进行免密sudo的配置
+
+```bash
+ ssh <服务器别名> 进行连接
+ # 这里可以直接输入下面的命令进行编辑，文件不存在会自动创建
+sudo visudo /etc/sudoers.d/<任意名称>
+```
+
+然后进入vi编辑器页面，输入
+
+`<用户名>  ALL=(ALL) NOPASSWD: ALL` 
+
+并保存，（保存并退出依照顺序按ctrl+o，enter，ctrl+x）
+
+### 原理
+
+这是文件的核心部分，它的基本语法结构如下：
+```text
+授权对象  主机列表 = (可切换的身份)  [是否需要密码:]  可执行的命令列表
+```
+其中：
+- **授权对象**：可以是用户名、`%组名`（表示用户组）、或上面定义的 `User_Alias`。
+- **主机列表**：规则适用的机器名，`ALL` 代表所有主机。
+- **可切换的身份**：用括号包裹，表示 `sudo` 后可以变成哪个用户（如 `root`）。`ALL` 代表任意用户。
+- **可执行的命令列表**：允许执行的命令的**绝对路径**。`ALL` 代表所有命令。`NOPASSWD:` 标签表示执行时无需输入用户自己的密码。
+
+###  几个具体的配置示例
+
+- **允许用户 `alice` 在任何主机上以 `root` 身份执行任何命令（需要密码）**：
+```text
+  alice   ALL = (root) ALL
+  ```
+- **允许 `%wheel` 组的成员执行所有命令，且无需输入密码**：
+```text
+  %wheel  ALL = (ALL) NOPASSWD: ALL
+  ```
+  这是很多发行版中经典的配置，方便管理组用户使用 `sudo`。
+- **允许用户 `bob` 在 `web01` 主机上，以 `root` 身份只重启 `nginx` 服务**：
+```text
+  bob   web01 = (root) /usr/bin/systemctl restart nginx
+  ```
+  这种精细化的授权体现了最小权限原则。
+	
+## 附录
+/# This is the sshd server system-wide configuration file.  See
+/# sshd_config(5) for more information.
+
+/# This sshd was compiled with PATH=/usr/local/bin:/usr/bin:/bin:/usr/games
+
+/# The strategy used for options in the default sshd_config shipped with
+/# OpenSSH is to specify options with their default value where
+/# possible, but leave them commented.  Uncommented options override the
+/# default value.
+
+Include /etc/ssh/sshd_config.d/*.conf
+
+#Port 22
+#AddressFamily any
+#ListenAddress 0.0.0.0
+#ListenAddress ::
+
+#HostKey /etc/ssh/ssh_host_rsa_key
+#HostKey /etc/ssh/ssh_host_ecdsa_key
+#HostKey /etc/ssh/ssh_host_ed25519_key
+#HostKey /etc/ssh/ssh_host_mldsa44_ed25519_key
+
+/# Ciphers and keying
+#RekeyLimit default none
+
+/# Logging
+#SyslogFacility AUTH
+#LogLevel INFO
+
+/# Authentication:
+
+#LoginGraceTime 2m
+#PermitRootLogin prohibit-password
+#StrictModes yes
+#MaxAuthTries 6
+#MaxSessions 10
+
+#PubkeyAuthentication yes
+
+/# Expect .ssh/authorized_keys2 to be disregarded by default in future.
+#AuthorizedKeysFile     .ssh/authorized_keys .ssh/authorized_keys2
+
+#AuthorizedPrincipalsFile none
+
+#AuthorizedKeysCommand none
+#AuthorizedKeysCommandUser nobody
+
+/# For this to work you will also need host keys in /etc/ssh/ssh_known_hosts
+#HostbasedAuthentication no
+/# Change to yes if you don't trust ~/.ssh/known_hosts for
+/# HostbasedAuthentication
+#IgnoreUserKnownHosts no
+/# Don't read the user's ~/.rhosts and ~/.shosts files
+#IgnoreRhosts yes
+
+/# To disable tunneled clear text passwords, change to "no" here!
+#PasswordAuthentication yes
+#PermitEmptyPasswords no
+
+/# Change to "yes" to enable keyboard-interactive authentication.  Depending on
+/# the system's configuration, this may involve passwords, challenge-response,
+/# one-time passwords or some combination of these and other methods.
+/# Beware issues with some PAM modules and threads.
+KbdInteractiveAuthentication no
+
+/# Kerberos options
+#KerberosAuthentication no
+#KerberosOrLocalPasswd yes
+#KerberosTicketCleanup yes
+#KerberosGetAFSToken no
+
+/# GSSAPI options
+#GSSAPIAuthentication no
+#GSSAPICleanupCredentials yes
+
+/# Set this to 'yes' to enable PAM authentication, account processing,
+/# and session processing. If this is enabled, PAM authentication will
+/# be allowed through the KbdInteractiveAuthentication and
+/# PasswordAuthentication.  Depending on your PAM configuration,
+/# PAM authentication via KbdInteractiveAuthentication may bypass
+/# the setting of "PermitRootLogin prohibit-password".
+/# If you just want the PAM account and session checks to run without
+/# PAM authentication, then enable this but set PasswordAuthentication
+/# and KbdInteractiveAuthentication to 'no'.
+UsePAM yes
+
+#AllowAgentForwarding yes
+#AllowTcpForwarding yes
+#GatewayPorts no
+X11Forwarding yes
+#X11DisplayOffset 10
+#X11UseLocalhost yes
+#PermitTTY yes
+PrintMotd no
+#PrintLastLog yes
+#TCPKeepAlive yes
+#PermitUserEnvironment no
+#Compression delayed
+#ClientAliveInterval 0
+#ClientAliveCountMax 3
+#UseDNS no
+#PidFile /run/sshd.pid
+#MaxStartups 10:30:100
+#PermitTunnel no
+#ChrootDirectory none
+#VersionAddendum none
+
+/# no default banner path
+#Banner none
+
+/# Allow client to pass locale and color environment variables
+AcceptEnv LANG LC_* COLORTERM NO_COLOR
+
+/# override default of no subsystems
+Subsystem       sftp    /usr/lib/openssh/sftp-server
+
+/# Example of overriding settings on a per-user basis
+#Match User anoncvs
+/#       X11Forwarding no
+/#       AllowTcpForwarding no
+/#       PermitTTY no
+/#       ForceCommand cvs server
+
+下面逐段解释这份 `sshd_config`。**这个文件里绝大多数行以 `#` 开头，表示“注释掉、不生效”，`sshd` 会使用编译时的默认值；只有少数未注释的行才是真正覆盖默认配置的生效项。**
+
+### 1. 文件头与 Include
+
+```text
+Include /etc/ssh/sshd_config.d/*.conf
+```
+
+这是**唯一一行在文件最前面真正生效的全局指令**。它会先把 `/etc/ssh/sshd_config.d/` 目录下所有 `.conf` 文件包含进来。
+
+- 现代发行版（Ubuntu/Debian 等）常把额外配置拆到这些小文件里，比如云镜像可能在这里放 `PasswordAuthentication no`。
+- **生效顺序**：`Include` 在这里，后面主文件里的设置会覆盖或补充；而 `sshd_config` 的规则是“**第一次出现的设置生效**”，所以 `Include` 放在最前面意味着小文件里的配置优先。实际排查时一定要看这个目录里有什么。
+
+### 2. 监听与主机密钥（全部注释）
+
+```text
+#Port 22
+#AddressFamily any
+#ListenAddress 0.0.0.0
+#ListenAddress ::
+#HostKey /etc/ssh/ssh_host_rsa_key
+...
+```
+
+全部使用默认值：
+
+- 监听 **22 端口**、所有地址族。
+- 使用 `/etc/ssh/ssh_host_*_key` 作为**服务器主机密钥**，用于客户端验证“这台服务器是不是真的”。
+- 注意这里出现了 `ssh_host_mldsa44_ed25519_key`，说明这个 OpenSSH 版本较新，支持后量子签名算法。但它是注释的，是否启用取决于编译默认值。
+
+### 3. 日志（全部注释）
+
+```text
+#SyslogFacility AUTH
+#LogLevel INFO
+```
+
+默认把日志写到 syslog 的 AUTH 设施，级别 INFO。排查登录问题时可临时改成 `LogLevel VERBOSE`。
+
+### 4. 认证核心参数（大部分注释，但很关键）
+
+```text
+#LoginGraceTime 2m
+#PermitRootLogin prohibit-password
+#StrictModes yes
+#MaxAuthTries 6
+#MaxSessions 10
+#PubkeyAuthentication yes
+```
+
+这些虽然注释，但默认值很重要：
+
+- `LoginGraceTime 2m`：连上后 2 分钟内必须完成认证。
+- `PermitRootLogin prohibit-password`：**root 不能用密码登录，但可以用公钥登录**。这是现代默认值，比早期的 `yes` 安全。
+- `StrictModes yes`：检查用户家目录、`.ssh`、`authorized_keys` 的权限，权限过宽会拒绝使用密钥。这就是之前说的“权限至关重要”的服务端开关。
+- `MaxAuthTries 6`：最多 6 次认证尝试。
+- `PubkeyAuthentication yes`：**默认启用公钥认证**。
+
+### 5. 与你之前问题直接相关的 `AuthorizedKeysFile`
+
+```text
+# Expect .ssh/authorized_keys2 to be disregarded by default in future.
+#AuthorizedKeysFile     .ssh/authorized_keys .ssh/authorized_keys2
+```
+
+这行被注释，说明使用默认值：**服务端会依次读取 `~/.ssh/authorized_keys` 和 `~/.ssh/authorized_keys2`**。
+
+- 这就是“系统信任哪些公钥”的白名单文件位置。
+- 注释里明确说：未来版本将不再读取 `authorized_keys2`，所以新配置应只用 `authorized_keys`。
+- 如果想改文件名或路径，就取消注释并修改这一行，例如 `AuthorizedKeysFile .ssh/my_keys`。
+
+### 6. 其他认证方式
+
+```text
+#AuthorizedPrincipalsFile none
+#AuthorizedKeysCommand none
+#AuthorizedKeysCommandUser nobody
+#HostbasedAuthentication no
+#IgnoreUserKnownHosts no
+#IgnoreRhosts yes
+#PasswordAuthentication yes
+#PermitEmptyPasswords no
+```
+
+- `AuthorizedKeysCommand none`：默认不通过外部命令查公钥。若企业集中管理公钥，可启用它从 LDAP/数据库拉取。
+- `PasswordAuthentication yes`：**默认允许密码登录**。很多安全加固指南会把它改成 `no`，强制只用密钥。
+- `PermitEmptyPasswords no`：不允许空密码。
+
+### 7. 实际生效的几行：键盘交互认证与 PAM
+
+```text
+KbdInteractiveAuthentication no
+UsePAM yes
+```
+
+这是文件中**未注释、真正生效**的两行：
+
+- `KbdInteractiveAuthentication no`：关闭键盘交互认证。注意它和 `PasswordAuthentication` 有交互：启用 PAM 时，密码认证可能通过 keyboard-interactive 走 PAM。这里关掉后，密码登录主要走 `PasswordAuthentication`。
+- `UsePAM yes`：启用 PAM，用于账户检查、会话处理等。
+
+### 8. 转发与会话功能
+
+```text
+#AllowAgentForwarding yes
+#AllowTcpForwarding yes
+#GatewayPorts no
+X11Forwarding yes
+#X11DisplayOffset 10
+...
+PrintMotd no
+```
+
+未注释生效的：
+
+- `X11Forwarding yes`：允许 X11 图形转发。
+- `PrintMotd no`：登录时不打印 `/etc/motd`。
+
+注释默认值：
+
+- `AllowTcpForwarding yes`：默认允许 TCP 端口转发。安全要求高时可设为 `no`。
+- `AllowAgentForwarding yes`：默认允许 ssh-agent 转发，有被滥用的风险，可考虑关闭。
+- `GatewayPorts no`：默认不把转发端口暴露到所有网卡。
+
+### 9. 连接保持与杂项
+
+```text
+#TCPKeepAlive yes
+#ClientAliveInterval 0
+#ClientAliveCountMax 3
+#UseDNS no
+#MaxStartups 10:30:100
+#PermitTunnel no
+#ChrootDirectory none
+#Banner none
+```
+
+默认值含义：
+
+- `ClientAliveInterval 0`：服务端不主动发保活探测。
+- `UseDNS no`：不做客户端反向 DNS 解析，加快登录。
+- `PermitTunnel no`：默认不允许 tun 设备隧道。
+- `Banner none`：不显示登录横幅。
+
+### 10. 实际生效：环境变量传递
+
+```text
+AcceptEnv LANG LC_* COLORTERM NO_COLOR
+```
+
+这一行**生效**，允许客户端把 locale、颜色相关环境变量传过来，影响登录后的终端显示。
+
+### 11. 实际生效：SFTP 子系统
+
+```text
+Subsystem       sftp    /usr/lib/openssh/sftp-server
+```
+
+这一行**生效**，定义 SFTP 子系统使用 `/usr/lib/openssh/sftp-server`。没有它，`sftp` 无法工作。
+
+### 12. 注释掉的 Match 示例
+
+```text
+#Match User anoncvs
+#       X11Forwarding no
+#       AllowTcpForwarding no
+#       PermitTTY no
+#       ForceCommand cvs server
+```
+
+这是条件配置的示例，全部注释，不生效。`Match` 块可以针对特定用户/组/来源地址覆盖上面的全局设置。
+
+---
+
+### 总结：这份文件实际生效的只有这几行
+
+| 生效行 | 作用 |
+|---|---|
+| `Include /etc/ssh/sshd_config.d/*.conf` | 先加载额外配置 |
+| `KbdInteractiveAuthentication no` | 关闭键盘交互认证 |
+| `UsePAM yes` | 启用 PAM |
+| `X11Forwarding yes` | 允许 X11 转发 |
+| `PrintMotd no` | 不打印 motd |
+| `AcceptEnv LANG LC_* COLORTERM NO_COLOR` | 允许传递部分环境变量 |
+| `Subsystem sftp ...` | 定义 SFTP 子系统 |
+
+其余全部注释，走默认值。**与密钥登录问题最相关的是**：`PubkeyAuthentication` 默认 `yes`，`AuthorizedKeysFile` 默认读 `~/.ssh/authorized_keys`，`StrictModes` 默认 `yes` 会检查权限——这三点共同决定了“公钥白名单 + 权限检查 + 挑战响应验证”的密钥登录机制。
+
+---
+
+## Linux操作系统-课堂笔记 课时11
+
+- **URL**: https://neecoo.dpdns.org/2026-10-linux-11/
+- **Published**: 2026-10-20
+- **Category**: 笔记
+- **Tags**: 学习, 笔记, linux
+
+## 一、DNS 的查询方式：递归与迭代
+
+DNS 的查询方法分为**递归查询**和**迭代查询**两种，区别在于"谁来跑腿"。
+
+### 递归查询
+
+客户机发出查询请求后，DNS 服务器**必须**返回给客户机一个正确的 IP 地址。这个结果从哪来？
+
+- 客户机以前查过 → 直接从 DNS 服务器的**本地缓存**里取；
+- 第一次访问新域名、缓存里没有 → DNS 服务器**代替客户机**向其他 DNS 服务器发起查询，直到问到结果，再答复客户机。
+
+主要特点：**客户机只需接触一次 DNS 服务器，就能得到所需的节点地址（即目标 IP 地址）**。客户机一般接触的是**本地域名服务器**。
+
+### 本地域名服务器
+
+就是客户机网卡配置里填的那台 DNS——替你跑腿完成递归查询的服务器，由网络运营商分配（例如 `114.114.114.114`）。
+
+### 迭代查询
+
+客户机送出查询请求后，如果 DNS 服务器里没有所需的结果，它就**告诉客户机（或替客户机转向）另外一台 DNS 服务器的地址**，到那台服务器上继续查询，以此类推，一台一台问下去——服务器不替你问到底，只指"下一家在哪"。
+
+### 一个完整的解析过程（例题）
+
+本地客户机向本地 DNS 服务器查询 `www.cnnic.net` 的 IP 地址：
+
+1. 本地 DNS 服务器没有该域的授权，转向**根服务器**询问；
+2. 根服务器判断这是 `.cn` 顶级域下的域名，指引去 **`.cn` 顶级域服务器**查询；
+3. `.cn` 服务器判断该域名归 `cnnic.net` 的 DNS 服务器管，转向 **`cnnic.net` 的域名服务器**继续查询；
+4. 最终查到 `www.cnnic.net` 的 IP 地址为 `159.226.1.9`；
+5. 本地 DNS 服务器把 `www.cnnic.net` ↔ `159.226.1.9` 做成一条记录，**存入本地缓存**（下次再有人查就直接回答）；
+6. 本地 DNS 服务器把结果回馈给客户机。
+
+**问：此处客户机到本地 DNS 用的是递归还是迭代？**
+答：**典型的递归查询**——本地 PC 只接触了一次 DNS 服务器，剩下的查询工作全部由 DNS 服务器代为完成。
+
+> 日常我们用得最多的就是递归查询（客户机 → 本地域名服务器这一段）；本地域名服务器向根、顶级域、权威服务器逐级去问的那一段，对各级服务器来说则是迭代查询。
+
+## 二、DNS 服务软件：bind 与 named
+
+### 考试小连招：软件名称 + 守护进程名称
+
+填空题最爱考 **Web 服务和 DNS 服务**这两个"软件名称 + 守护进程名称"的组合：
+
+| 服务 | 软件包名称 | 守护进程名称 |
+|---|---|---|
+| Web 服务 | **Apache**（[上节课](https://neecoo.dpdns.org/2026-10-linux-10/)所讲） | **httpd** |
+| DNS 服务 | **bind** | **named** |
+
+### bind 的体系结构
+
+- bind 是在 Unix 和 Linux 系统上实现域名解析的软件包，典型的 **C/S（客户机/服务器）** 形态；
+- **服务器端**：守护进程 named 的可执行文件位于 `/usr/sbin`（usr 下的系统二进制目录 sbin）；
+- **客户端**：解析器（resolver）——客户机上负责发起域名解析、把查询结果反馈给客户机程序的转换组件；
+- **主配置文件**：`/etc/named.conf`（named 的 conf），相关修改都在主配置文件上完成；
+- **启动脚本**：`/etc/rc.d/init.d/named`。
+
+### named.conf 规定的工作目录
+
+主配置文件里规定好的**工作目录是 `/var/named`**——它代表**正向解析区域文件和反向解析区域文件的存放位置**。
+
+> **考点**：考试创建正向/反向解析文件时，必须指出文件创建在 `/var/named` 目录下。与 DNS 体系相关的所有文件都存放在这里。
+
+### 工作目录里的默认文件
+
+| 文件（均在 /var/named 下） | 身份 | 说明 |
+|---|---|---|
+| `named.ca` | 根域文件 | 记录 13 台根服务器的地址，**系统帮我们配置好的，不要去改** |
+| `named.localhost` | 默认的正向解析区域文件 | 书写模板：把 `localhost` 域解析为 `127.0.0.1`（系统回环测试地址对应的域叫 localhost） |
+| `named.loopback` | 默认的反向解析区域文件 | 把 `127.0.0` 反向还原为 localhost，实验不做 |
+
+做实验的思路就是：**拷贝 `named.localhost` 模板 → 把 localhost 换成自己的域名 → 把 `127.0.0.1` 换成自己服务器的 IP**。
+
+## 三、区域（zone）与区域类型
+
+### 区的概念
+
+一台域名服务器实际掌管的范畴称为**区（zone）**（参见[课时10"DNS 域名系统"](https://neecoo.dpdns.org/2026-10-linux-10/#%E4%B9%9Ddns-%E5%9F%9F%E5%90%8D%E7%B3%BB%E7%BB%9F)）。在 named.conf 里声明一个区，主要包含三件事：
+
+1. **域名**——你要管的域叫什么；
+2. **类型（type）**——这个区域的角色；
+3. **信息源（file）**——对应的**解析区域文件**是哪一个。
+
+### 三种区域类型
+
+| 类型 | 名称 | 适用 |
+|---|---|---|
+| **master** | 主域 | **凡是自己声明的域，类型必须写 master** |
+| **hint** | 高速缓存 | **只适用于根域**（zone "."） |
+| **slave** | 从域（备用域名服务器） | 考试不考，不要求 |
+
+### 正向解析与反向解析
+
+DNS 系统分为正向解析系统和反向解析系统两种：
+
+- **正向解析**：域名 → IP 地址，实验要完成的内容；
+- **反向解析**：IP 地址 → 域名，只做讲解，实验和考试不要求写。
+
+反向解析有一个专用的域名后缀，名字必须记住：**`in-addr.arpa`**。它的写法是把 IP 地址的**前三个字节倒过来写**：例如服务器 IP 是 `210.43.118.128`，反向区域名就是 `118.43.210.in-addr.arpa`。
+
+> 反向域中，IP 的**一个字节代表一级子域**：IP 共四个字节，每个字节 8 位，可取 2⁸ = 256 个不同的值——所以一个字节正好划分出 256 个不同的子域。
+
+## 四、资源记录：区域文件里的关键字
+
+| 关键字 | 全称 | 含义 |
+|---|---|---|
+| **A** | Address（主机记录） | 建立**域名 ↔ IP 地址**之间的映射，指出 DNS 服务器或 Web 服务器的 **IP 地址**，**最重要**的记录 |
+| **CNAME** | Canonical NAME | **别名记录**：Web 服务器与 DNS 服务器同机、IP 相同，不必再写一条 A 记录，直接声明"它是 DNS 的别名"即可 |
+| **NS** | Name Server（板书作 name service） | 指定本域的域名服务器 |
+| **SOA** | Start of Authority | 授权记录，声明"这个区授权给谁管" |
+| **PTR** | Pointer | 指针记录，**只出现于反向解析文件**之中（正向文件里没有） |
+| **MX** | Mail eXchange | **邮件交换**记录，给邮件服务器用的；没搭建邮件服务器就不用配 |
+
+上面这些关键字**正向、反向解析文件都可以用**；PTR 是唯一只属于反向解析文件的。
+
+### SOA 与 NS 必须一致（高频考点）
+
+**SOA 授权给谁，NS 记录就必须指定为谁**，两边必须一模一样、一个标点都不能错，否则出错。
+
+### MX 与邮件服务器
+
+一个**电子邮件服务器里必须包含一个 DNS 服务器**：发邮件时写的是 `xxx@qq.com` 这样的地址，必须有 DNS 把域名翻译成 IP 地址，邮件才发得出去。但我们现在只做 DNS 的翻译，并没有实现电子邮件的收发，所以**现在不用 MX 关键字，抄下来也没用**（等后面讲到邮件服务器时就能体会）。
+
+## 五、安装 bind 与测试工具
+
+### rpm 检查与三个软件包
+
+```bash
+rpm -qa | grep bind    # 查询所有已安装的、名字带 bind 的软件包
+```
+
+典型结果三个，只有第三个需要我们手动装：
+
+| 软件包 | 内容 | 是否需要手动装 |
+|---|---|---|
+| `bind-libs` | 实现域名解析必要的**库** | 系统默认已装好 |
+| `bind-utils` | 对 DNS 服务器进行**测试的工具集** | 系统默认已装好 |
+| `bind` | **主程序** | 没装就只装它：`rpm -ivh bind-版本号.rpm` |
+
+测试 DNS 的主要工具是 **nslookup**（由 bind-utils 提供）。不同版本的软件包名不一样：老版本 RHEL 5 里 DNS 服务软件包叫 **caching-nameserver**。
+
+### 光盘安装：挂载与带空格的目录
+
+图形界面下系统已自动把光盘挂载好，位置在 **`/media`**；**只有图形界面才自动挂载，纯文本界面必须手动 mount**（手动挂载的命令参见[课时10"Apache：安装、启停与验证"](https://neecoo.dpdns.org/2026-10-linux-10/#%E5%85%ADapache%E5%AE%89%E8%A3%85%E5%90%AF%E5%81%9C%E4%B8%8E%E9%AA%8C%E8%AF%81)）。
+
+进入安装包目录的两个坑（课堂演示盘是 **Fedora 11**，`/media` 下的光盘目录名是 `Fedora 11 i386 DVD`，名字里带空格）：
+
+1. **目录名带空格**：`cd` 是一个命令，**每遇到一个空格就做一次参数划分**——直接敲 `cd Fedora 11 i386 DVD`，它只把 `Fedora` 当作目标目录，后面三个词都被当成多余参数，切换失败；
+2. **用转义符（反斜杠 `\`）转义空格时，该有的部分一个不能省**——每一个空格前面都要加 `\`，写成 `cd Fedora\ 11\ i386\ DVD`；漏掉任何一个都照样失败。
+
+最省事的做法：敲目录名开头几个字母按 **Tab 键补全**，系统会自动处理空格。进入光盘的 **`Packages`** 目录（RHEL 5 在 Server 目录，更早版本在 RedHat/RPMS）就能找到所有安装包：
+
+```bash
+cd /media
+ls
+cd Fedora\ 11\ i386\ DVD/Packages    # 或敲 cd Fed 后按 Tab 键自动补全
+ls | grep bind            # 过滤出 bind 相关的包
+rpm -ivh bind-版本号.rpm   # 只需安装主程序
+```
+
+## 六、主配置文件 /etc/named.conf
+
+### 配置之前先备份
+
+DNS 要书写的内容很多，改配置前先备份：
+
+```bash
+cd /etc
+cp named.conf named.bak    # 把原主配置文件原封不动复制一份，命名为 named.bak
+```
+
+**还原**（改乱了想恢复原样重来一遍时）：
+
+```bash
+cp named.bak named.conf    # 反向拷贝回去；提示是否覆盖原文件时输 y 确认
+```
+
+### 文件风格：注释与生效语句
+
+打开 named.conf 会发现：绝大多数语句**不是**被 `#` 注释掉的，而是**生效语句**——这一点与 vsftpd.conf、httpd.conf 大部分行被注释不同。named.conf 的注释除了 `#`，还可以用**双斜线 `//`**（C 语言风格）。
+
+### options 段：全局配置
+
+| 配置项 | 说明 |
+|---|---|
+| `listen-on port 53 { 127.0.0.1; };` | 服务器监听 **53 号端口**——DNS 常规查询是少有的几个**基于 UDP 协议**的服务（查询报文用 UDP 承载；超长应答和区域传送则改用 TCP），服务器要时刻监视 53 号端口有没有查询请求。刚打开文件时还不知道本机 IP 配给谁，模板默认写回环地址 127.0.0.1，**改成自己配的 IP 或 `any`** |
+| `listen-on-v6 port 53 { ::1; };` | IPv6 下的回环测试地址是**双冒号 `::1`** |
+| `directory "/var/named";` | 规定好的**工作目录**，**一定不要去改**，改了会出各种莫名其妙的错误 |
+| `allow-query { localhost; };` | 允许查询的范围（哪些主机可以向本服务器发起查询），实验时可注释掉或写成 `any` |
+
+### 根域声明（勿动）
+
+第一个生效的 zone 是**根域**，类型 hint，对应文件 named.ca：
+
+```conf
+zone "." IN {
+    type hint;
+    file "named.ca";
+};
+```
+
+根域是系统帮我们配置好的，**千万不要动**。
+
+### 声明自己的正向区域
+
+自己声明的区域**必须写在根域声明的下面**（方便照着根域的样子拷贝修改，不容易出错）：
+
+```conf
+zone "yhx.com" IN {
+    type master;
+    file "yhx.com.zone";
+};
+```
+
+书写注意三点：域名要用**英文双引号**引起来；类型和文件名必须写在**大括号**里；**大括号后面有英文分号**，大括号里每一句也都要用英文分号结尾——这里非常容易出错，必须仔细。
+
+两个要点：
+
+- **声明的是域名 `yhx.com`，不是访问时输入的 `www.yhx.com`**——浏览器访问时要输入 `www.域名`，`www` 这部分是域里的主机名，需要到区域文件里补记录（用别名记录实现，见下一节）；
+- **正向解析区域文件的命名：域名 + `.zone`**（因为它是正向解析区域文件，即区域数据文件），如 `yhx.com.zone`。
+
+这个正向区域文件完成的任务就一句话：**把 `www.yhx.com` 翻译成 Web 服务器的 IP 地址**。所以不管你声明的域叫什么名字，最后解析出来的结果都是同一个——**你这台 DNS/Web 同机服务器的 IP**，所有人的域名不一样，解析结果却都一样。
+
+### 声明反向区域（了解，不做）
+
+反向区域名是 IP 前三个字节**倒写**加 `in-addr.arpa`（如 `118.43.210.in-addr.arpa`），类型同样是 master，反向区域文件名自定（如 `210.43.118.zone`）。它实现的是把 Web 服务器的 IP **还原**成 `www.yhx.com`——实验不做、考试不写，跳过。
+
+## 七、正向解析区域文件（考试唯一重点）
+
+做 DNS 实验考察的**唯一重点就是正向解析文件有没有写错**。防错办法：先拷贝默认正向文件做模板，再修改。
+
+```bash
+cd /var/named
+cp named.localhost yhx.com.zone    # 域名 + .zone
+```
+
+修改分四步：① 修改文件头的**授权记录（SOA）** → ② 指定 **NS（nameserver）** → ③ 给出 **nameserver 的 IP**（A 记录）→ ④ 给出 **Web 服务器记录**（www 的别名）。就这四步。
+
+### 文件头：$TTL 与 SOA
+
+模板文件头：
+
+```bindzone
+$TTL 1D
+@	IN SOA	@ rname.invalid. (
+			0	; serial
+			1D	; refresh
+			1H	; retry
+			1W	; expire
+			3H )	; minimum
+```
+
+- **`$TTL 1D`**：文件起始标志，`1D` 代表一天（TTL = 记录的缓存存活时间）；抄模板时别抄错这一行；
+- **`@`**：代表**当前域名**（从 named.conf 里声明的区域名读取，即授权记录后面的部分）。模板里 SOA 行写的就是一个 `@`，**建议大家直接用 `@` 代替**；如果想写完整域名，必须写成 `yhx.com.` **末尾带点**（完全限定域名 FQDN 的标志），不带点就出现语法错误；
+- **`IN` 是关键字**，`SOA` 是授权——授权给谁；
+- **其后是管理员邮箱位**：这一位表示"域名解析出错时联系谁"——即 **DNS 服务器管理员的邮件**。模板写作 `admin.域名.`，**可以改为 `root.域名.`**（root 是超级用户；区域文件里邮箱的 `@` 符号要写成点，即 `root@yhx.com` 写作 `root.yhx.com.`）。**按课堂标准必须把用户名和域名写全、末尾带点**——单独写 `root` 系统会按当前域名自动补全、不一定报错，但不符合考试要求的标准写法。
+
+### SOA 括号里的五个参数
+
+| 参数（示例值） | 含义 |
+|---|---|
+| serial（如 `0` 或 `2026102001`） | **序列号**（版本号），每次修改区域文件手工加 1 |
+| refresh（`1D` 或 7200 秒） | **刷新时间**：从服务器多久来同步一次 |
+| retry（`1H` 或 1800 秒） | **重试时间**：同步失败后多久重试 |
+| expire（`1W` 或 1 天） | **过期时间**：从服务器一直联系不上主服务器时，超过该时间数据失效 |
+| minimum（`3H` 或 1 小时） | **最小 TTL**：记录未单独指定 TTL 时的默认缓存时间（RFC 2308 之后兼作"域名不存在"这类否定应答的缓存时间） |
+
+### 必写的三句话（考试得分点）
+
+区域文件里真正算分的只有三句：
+
+```bindzone
+@	IN NS	dns.yhx.com.
+dns	IN A	210.43.118.128
+www	IN CNAME	dns
+```
+
+**第一句：指定 NS 记录**
+- 行首可以用 `@` 代替，也**可以什么都不写**（留空则沿用上一条记录的域名，模板中上一行正是 SOA 的 `@`，结果相同）；
+- NS 要求的写法**只有一种：`dns.域名.`**——我实现的域叫 `yhx.com`，授权记录就写 `dns.yhx.com.`，**末尾必须带点**，这是标准写法；
+- NS 指定的域名服务器**必须与上面 SOA 的授权完全一致**，一个标点符号都不能错。
+
+**第二句：给出 nameserver 的 IP（A 记录）**
+- 完整写法是 `dns.yhx.com. IN A 210.43.118.128`；
+- 行首可以**简写为 `dns`**——后面的域部分可以从上面的授权记录（当前区域名）继承出来，简写安全且省事。
+
+**第三句：给出 Web 服务器的记录（别名）**
+- 由于 **Web 服务器和 DNS 服务器是同一台机器、IP 相同**，此处用**别名记录 CNAME**：`www IN CNAME dns`；
+- 意思是"`www.yhx.com` 和 `dns.yhx.com` 是同一个东西"——上面已经给出了 dns 的 IP，www 自然也是它；
+- 不用简写、写全 `www.yhx.com. IN CNAME dns.yhx.com.` 也可以，**但推荐用简写**。
+
+### 不要抄网上的多余内容
+
+网上教程常抄来这些，**都没有考试得分点**：
+
+- `bbs`（论坛）、`blog`（博客）、`mail`（邮件服务器）的别名记录——你没有这些服务器，配了没用；
+- **`dns1` / `dns2` 两台 NS**——dns1 是主 DNS、dns2 是从 DNS（备用域名服务器）。我们只配置了一台 DNS，不分什么 dns1、dns2；只有一台就只写 `dns`，写 dns1/dns2 完全无效。
+
+## 八、反向解析区域文件（只讲解）
+
+反向解析文件与正向文件结构类似：也有文件头和授权记录，多了一类**指针记录 PTR**。区别在于：
+
+- **第一行不用 `@` 代替**（课堂标准写法），把反向区域名**完整写出**：`118.43.210.in-addr.arpa.`——named.conf 里声明的反向区域叫什么名字，这里就得写什么名字（`@` 本身就是区域名的代称，技术上可用；写全名是为了与声明严格对照、不易出错）；
+- **PTR 记录行首有一个数字，这个数字是 IP 地址的最后一个字节**：本机 IP 是 `210.43.118.128`，行首就写 `128`——
+
+```bindzone
+128	IN PTR	www.yhx.com.
+```
+
+网上有教程写 `6 IN PTR …` 是因为**人家的 IP 是 `192.168.1.6`**；照抄人家的 `6` 而自己的 IP 末字节是 128，就错了——平时不用反向解析所以"做成功了"，考试要考反向解析，直接忽略这个数字的含义就会栽跟头。
+
+## 九、语法检查与解析测试
+
+### named-checkzone：语法检查
+
+区域文件写完后，必须用 named-checkzone 检查（**考试时这条命令必须写进报告**）：
+
+```bash
+named-checkzone yhx.com /var/named/yhx.com.zone
+```
+
+输出 `OK` **只代表没有语法拼写错误**，具体能不能解析成功它不知道——能不能成功要靠 nslookup 验证。
+
+### resolv.conf：最容易漏的一步（至关重要）
+
+**最后一步，很多人（包括老师自己）做到这步都会忘**：把我们所实现的域和 DNS 服务器的 IP 地址写入 **`/etc/resolv.conf`**——
+
+```bash
+vi /etc/resolv.conf
+# 写入一行：
+nameserver 210.43.118.128    # 指向本机 DNS 服务器
+```
+
+**不写进去，系统就找不到 DNS 服务器的位置**，后面测试全白搭。教学视频里演示者一开始测试不通，排查半天，关键原因就是漏了这一步。（让系统找到 DNS，写 `nameserver` 一行即可；`search 域名` 行可选，只是把输入的不带域后缀的主机名自动补全。）
+
+### nslookup：解析测试
+
+```bash
+nslookup www.yhx.com
+```
+
+能看到域名对应的 **IP 地址**和提供解析的**服务器（53 号端口）**，说明测试成功。
+
+## 十、综合实验：DNS + Apache 虚拟主机
+
+虚拟主机（一台 Web 服务器对应多个域名）的概念、Name-Based 原理和整体框架见[课时10"虚拟主机"](https://neecoo.dpdns.org/2026-10-linux-10/#%E5%85%AB%E8%99%9A%E6%8B%9F%E4%B8%BB%E6%9C%BA)，此处不再重复。本节按一份有代表性的同学实验报告走一遍完整流程（IP `192.168.40.40`，两个域 `zzq.com` 和 `zlt.com`），并点评他报告里的问题。
+
+### 实验架构：一台机器、两个服务
+
+- 只有一台虚拟机：**既做 DNS 服务器，又做 Web 服务器**（Apache + bind 同机）；
+- 既然是同一台计算机，两个服务的 **IP 地址相同**（都是 192.168.40.40）；
+- 先用 ifconfig 给本机配好 IP，同时得到广播地址和子网掩码。
+
+需要修改**两个**配置文件：`/etc/httpd/conf/httpd.conf`（Web 侧）和 `/etc/named.conf`（DNS 侧）。
+
+### DNS 侧：named.conf 声明两个域
+
+```conf
+zone "zzq.com" IN {
+    type master;
+    file "zzq.com.zone";
+};
+zone "zlt.com" IN {
+    type master;
+    file "zlt.com.zone";
+};
+```
+
+（反向区域不做，注释掉即可。）凡是自己声明的域，类型都必须是 master 主域。
+
+### 正向解析文件（点评版）
+
+以 `zzq.com.zone` 为例，正确的写法：
+
+```bindzone
+$TTL 1D
+@	IN SOA	dns.zzq.com. root.zzq.com. (
+			0	; serial
+			1D	; refresh
+			1H	; retry
+			1W	; expire
+			3H )	; minimum
+	IN NS	dns.zzq.com.
+dns	IN A	192.168.40.40
+www	IN CNAME	dns
+```
+
+报告里出现的典型问题：
+
+- **`$TTL` 抄错**：有同学抄别人的把 `$TTL` 抄成了别的写法，反复测试来问哪里错了——`1D` 代表 one day（一天），照模板抄别抄走样；
+- **授权记录写了无效前缀**：只有一个域就授权给 `dns.zzq.com.`，不要照网上写 `dns1`/`dns2`（我们没有主备两台 DNS）；管理员联系位写 `root.zzq.com.`；
+- **NS 行与 SOA 一致**：NS 后面写 `dns.zzq.com.`，与 SOA 授权一模一样；
+- A 记录给 dns 的 IP（192.168.40.40），www 用 CNAME 指向 dns——**Web 服务器与 DNS 同机，所以 www 不需要单独的 A 记录**。
+
+两个域各写一份，写完**每个域都要跑一遍语法检查**：
+
+```bash
+named-checkzone zzq.com /var/named/zzq.com.zone
+named-checkzone zlt.com /var/named/zlt.com.zone    # 都输出 OK 才算过
+```
+
+然后把**两个域名和 DNS 服务器的 IP 都写入 `/etc/resolv.conf`**，再用 nslookup 分别测试两个域名——能看到 IP 和 53 号端口，解析成功。
+
+### Apache 侧：两个 VirtualHost
+
+```apache
+NameVirtualHost 192.168.40.40    # Apache 2.2（RHEL 6）必须先声明；Apache 2.4 已取消该指令
+
+<VirtualHost 192.168.40.40>
+    ServerName www.zzq.com
+    DocumentRoot /var/www/html/hello/
+</VirtualHost>
+
+<VirtualHost 192.168.40.40>
+    ServerName www.zlt.com
+    DocumentRoot /var/www/html/zlt/
+</VirtualHost>
+```
+
+- 两台虚拟主机 **IP 相同**（192.168.40.40），端口都是 80，靠**域名**区分；基于域名的虚拟主机在 Apache 2.2 下**必须先写 `NameVirtualHost` 声明**——不写的话所有请求都落进第一台虚拟主机、两个域名看到同一个站（课时 10 常见错误排查里的第一条就是它）；
+- `<VirtualHost>` 开头、`</VirtualHost>` 结尾，每台给出自己的 `ServerName` 和主页存放位置；
+- 主页目录要先创建（`mkdir`），**DocumentRoot 路径末尾的斜杠 `/` 按课堂书写标准要带上、别丢**（Apache 对末尾斜杠本身不挑剔，带不带都识别；报告和考试按课堂标准书写）；
+- 两个域名的主页存放位置**不能相同**，看到的内容才完全不同、互不干扰。
+
+### 主页文件
+
+- 文件名**只能**用 `index.htm` 或 `index.html` 两个名字之一——默认主页名由 `DirectoryIndex` 指令决定，RHEL 6 默认只列 `index.html`；若用 `index.htm` 访问不显示，把 `index.htm` 加进 DirectoryIndex 或干脆直接用 `index.html` 最稳；
+- 不必写完整的 HTML5 结构体（`<html>`、`<head>`、`<title>` 那一套可以全删），**直接往文件里写文字**、保存成 .htm/.html 就能被解析显示；
+- 内容要求两个主页各两行：
+  - **第一个主页**：第一行专业（物联网工程），第二行班级（**本24物联03班或04班**）；
+  - **第二个主页**：学号和姓名；
+- 每个虚拟主机的 DocumentRoot 里各放一个 `index.html`。
+
+### 测试两步
+
+1. **先用 Linux 本机的浏览器测试**两个域名，都能出页面；
+2. **再用 Windows 客户端浏览器测试**：必须把 **DNS 服务器的 IP 地址填到 Windows 的网络配置（网卡的 DNS 服务器）里去**，不然解析不到、测试不成功。
+
+### 另一种做法：一个域划两个子域（不推荐）
+
+也可以只声明**一个域**（如 `zzq.com`）创建虚拟主机，但前提是用这一个域的**两个子域**来实现（`hello.zzq.com` 和 `fine.zzq.com`）——不能一个叫 `zzq.com`、一个叫别的名字，因为那是两个不同的域。
+
+named.conf 里只声明 `zzq.com` 一个区域，但它的区域文件写法不同：**第一行要用 `$ORIGIN`**（声明授权从哪个域开始划分子域），为这个域划分两个子域：
+
+```bindzone
+$ORIGIN zzq.com.
+@	IN SOA	dns.zzq.com. root.zzq.com. ( 0 1D 1H 1W 3H )
+	IN NS	dns.zzq.com.
+dns	IN A	192.168.40.40
+hello	IN CNAME	dns
+fine	IN CNAME	dns
+```
+
+`$ORIGIN zzq.com.` 声明其后所有记录的基准域名（后面各行写的相对名都以它补全，授权即从这个域开始划分）；最终实现的两个域名是 `hello.zzq.com` 和 `fine.zzq.com`，IP 都是同一个。这种写法可行、测试也能通，但**不推荐**，按要求用两个独立域的做法。
+
+---
+
+## 实验与考试要求
+
+- **环境**：实验用 VMware（[课时10 综合实验步骤](https://neecoo.dpdns.org/2026-10-linux-10/#%E7%BB%BC%E5%90%88%E5%AE%9E%E9%AA%8C%E6%AD%A5%E9%AA%A4web--dns-%E5%90%8C%E6%9C%BA)的环境准备同样适用），**在同一台虚拟机上同时搭建 DNS 和 Web 两个服务**——按这个标准做。
+- **两服务同机，IP 相同**：DNS 服务器和 Web 服务器在同一台计算机上，两个服务的 IP 地址是一样的。
+- **DNS 实验的工作内容（四步）**：
+  1. 同一台虚拟机上搭建 DNS + Web 两个服务；
+  2. 创建并声明一个自己的域，写出它的正向解析文件（反向解析不做）；
+  3. 用浏览器访问域名：由本机 DNS 服务器把域名解析成 Web 服务器的 IP——测试时 **HTTP 协议后面不能输 IP，必须输域名**；
+  4. 浏览器里看到 **Apache 的 test page（或自己的主页）**，才算实验完成。
+- **区域文件三句话**：NS（与 SOA 授权一致，写 `dns.域名.`）+ dns 的 A 记录 + www 的 CNAME——得分点只有这三句，bbs/blog/mail/dns1/dns2 都不要。
+- **检查与测试**：`named-checkzone 域名 区域文件` 必须写进报告（OK 只代表语法正确）；域名和 DNS 服务器 IP 写入 `/etc/resolv.conf`；`nslookup 域名` 验证解析。
+- **主页要求**：文件名只能 `index.htm` 或 `index.html`；第一个主页第一行专业（物联网工程）、第二行班级（本24物联03班或04班），第二个主页学号姓名；两个主页放在不同 DocumentRoot 里。
+- **测试两步**：先 Linux 本机浏览器，再 Windows 客户端浏览器（Windows 网卡 DNS 必须指向 DNS 服务器 IP）。
+
+## 本课重点速记
+
+1. 递归查询：客户机只接触一次（本地）DNS 服务器，DNS 必须给出正确 IP（缓存没有就代替客户机去问）；迭代查询：服务器不替你问到底，只告诉你下一台 DNS 的地址。我们日常用的最多的是递归。
+2. 解析过程例：本地 DNS → 根服务器 → `.cn` 顶级域 → `cnnic.net` 权威服务器 → 得到 159.226.1.9 → 本地 DNS 缓存结果并回给客户机——客户机只接触一次，典型递归。
+3. 填空小连招：Web 服务 = Apache / httpd；DNS 服务 = **bind / named**。bind 是 C/S 形态，客户端是解析器（resolver）。
+4. 文件布局：主配置 `/etc/named.conf`；工作目录 `/var/named`（正反向区域文件都放这里，考试要写出路径）；named 在 `/usr/sbin`；启动脚本 `/etc/rc.d/init.d/named`。
+5. `/var/named` 三个默认文件：`named.ca` 根域（勿动）、`named.localhost` 正向模板（localhost → 127.0.0.1）、`named.loopback` 反向模板（不做）。实验 = 拷贝模板把 localhost 换成自己的域、127.0.0.1 换成自己服务器的 IP。
+6. 区域类型：自己声明的域必须 `type master`；hint（高速缓存）只用于根域；slave 不考。声明区域 = 域名（引号）+ 类型 + file（信息源=区域文件），全写在带分号的大括号里，写在根域声明下面。
+7. 正向区域文件命名：**域名 + `.zone`**；作用：把 `www.域名` 翻译成 Web 服务器 IP（= 本机 IP，人人域名不同、结果相同）。声明的是域名 `yhx.com`，浏览器访问输的是 `www.yhx.com`，www 要靠记录补。
+8. 反向解析域 `in-addr.arpa`：IP 前三个字节倒写（210.43.118.128 → 118.43.210.in-addr.arpa）；一个字节 = 一级子域 = 2⁸ = 256 个取值；实验不做。
+9. 资源记录：A（地址，最重要）、CNAME（别名，同机 Web 用）、NS、SOA（授权）、PTR（只在反向文件）、MX（邮件交换，没邮件服务器不用）。**SOA 授权给谁，NS 必须指定谁，一模一样**。邮件服务器必须包含 DNS。
+10. 区域文件文件头：`$TTL 1D`（1D=一天）；`@` 代表当前域名（推荐用 @；写全必须 `yhx.com.` 末尾带点，不带点语法错误）；管理员邮箱按标准写全 `root.域名.`（末尾带点）；SOA 括号五参数 = 序列号 / 刷新 / 重试 / 过期 / 最小 TTL。
+11. 得分三句话：`@ IN NS dns.域名.`（NS 唯一标准写法 dns.域名.）＋ `dns IN A 本机IP`（可简写 dns）＋ `www IN CNAME dns`（Web 与 DNS 同机用别名，推荐简写）。bbs/blog/mail/dns1/dns2 全是无效抄写。
+12. 反向文件：区域名按课堂标准写全 `118.43.210.in-addr.arpa.`（不用 @）；PTR 行首数字 = IP 的**最后一个字节**（IP 210.43.118.128 就写 128，抄别人的 6 是错的）。
+13. 光盘装 bind：图形界面自动挂载在 `/media`（纯文本要手动 mount）；课堂演示盘是 Fedora 11（目录名 `Fedora 11 i386 DVD` 带空格）——cd 遇空格就划分参数，要用 `\` 转义**每一个**空格（`cd Fedora\ 11\ i386\ DVD`）或 Tab 补全；包在 Packages 目录（RHEL 5 在 Server）；`rpm -ivh` 只装主程序 bind（bind-libs、bind-utils 默认已有）；RHEL 里叫 caching-nameserver。测试工具 nslookup。
+14. named.conf：改前备份 `cp named.conf named.bak`，还原反向 cp 回来（覆盖输 y）；注释用 `#` 或 `//`；`listen-on port 53`（DNS 基于 **UDP** 协议）改成本机 IP 或 any；`directory "/var/named"` **勿改**；根域 zone "." type hint 勿动。
+15. `named-checkzone 域名 文件` 输出 OK 只代表语法没错，能否解析要看 nslookup；**最易漏的一步：把域和 DNS 服务器 IP 写进 `/etc/resolv.conf`（nameserver 本机IP），不写系统找不到 DNS**。
+16. 虚拟主机综合实验：一台机器双服务同 IP；named.conf 声明两个域 → 各写正向文件（三句话）→ named-checkzone → 写 resolv.conf → nslookup 测试 → httpd.conf 先 `NameVirtualHost IP`（Apache 2.2 必须，不写则两个域名落进同一个站）再写两个 `<VirtualHost IP>`（同 IP、ServerName + DocumentRoot，**路径末尾斜杠按课堂标准带上**）→ 注释默认 test page → 每个目录放 index.htm/html 主页 → 先 Linux 浏览器后 Windows 客户端（其 DNS 指向服务器 IP）测试。
+17. 主页名 index.htm / index.html（RHEL 6 默认 DirectoryIndex 只列 index.html，.htm 不显示就换 index.html 最稳），HTML 结构体可全省直接写字：第一个主页专业+班级，第二个学号+姓名。
+18. 单域双子域做法：区域文件第一行 `$ORIGIN zzq.com.`，划分 hello、fine 两个子域（行首直接写子域名），实现 hello.zzq.com 与 fine.zzq.com——可行但不推荐。
+19. 视频要点：RHEL 装 caching-nameserver；vi 批量替换 `:%s/旧/新/g`；清屏 Linux clear（Ctrl+L 等效）、Windows cls；演示者测试不通就败在没写 resolv.conf。
+
+---
+
+## Linux操作系统-课堂笔记 课时10
+
+- **URL**: https://neecoo.dpdns.org/2026-10-linux-10/
+- **Published**: 2026-10-17
+- **Category**: 笔记
+- **Tags**: 学习, linux, 笔记
+
+## 一、建站全流程
+
+创建一个属于自己的网站，动手前先想清楚三件事：
+
+1. **域名想好了没有？**（网站的"门牌号"，见第二节）
+2. **服务器怎么来？**——托管还是自己拉专线（专线：向运营商租用的独享高速线路；托管见第三、四节）
+3. **网站做静态的还是动态的？**（决定要不要连数据库）
+
+静态网站就是一个页面（如公司介绍）；要让用户在线注册、提交订单，就得做成动态平台，网站后台要连接**数据库**（专门存放和管理数据的软件，如 MySQL——注册信息、订单记录都存在里面）。
+
+完整的建站流程：
+
+```text
+注册域名 → 准备服务器（自建机房 / 主机托管 / 虚拟主机）
+→ 编写网页代码（静态页面 或 动态+数据库）→ 开通足够的接入带宽
+→ 在服务器上部署主页、代码、数据库 → 启动 Web 服务
+→ 设置防火墙 → 数据备份            ——至此网站发布成功
+```
+
+申请域名、设计网站可以自己完成，也可以委托别人做（见第二节"代理注册"）。
+
+## 二、域名：只能租，不能买断
+
+### 管理机构
+
+1997 年 5 月 30 日，中国制定《中国互联网络域名注册暂行管理办法》，由国务院信息办组织，**中国互联网络信息中心（CNNIC）** 负责全国域名注册的运行管理。
+
+域名的核心规则：**只能租用，不能买断**——花再多钱也不能永久买断一个域名；到期不续费，域名会被收回，任何人都可以再注册。
+
+### 三个抢注/丢名案例
+
+- **少林寺**：日本人曾把与少林寺相关的网上内容全部抢先注册，以至于欧洲人一度以为少林寺在日本。后来释永信主持少林寺，鼓励僧人用电脑、带武僧团赴欧洲巡演，外界才弄清少林寺在中国。
+- **派克（Parker）钢笔**：在欧美签正式的手写合同必须用钢笔，最著名的品牌是派克——Parker 本义与"看停车场的人"（park + er）相关，而 `www.parker.com` 这个域名被一家停车管理类的小公司先注册了。派克当年只做传统线下门店、不认为互联网能掀起多大浪，等意识到电商重要性时域名已经不在了，谈判低价收购不成还打了官司——判决是域名**先到先得**，注册方并没有抢注违规，最终派克付了一大笔钱才把域名买回来。
+- **FM365**：曾与新浪、搜狐齐名的门户网站，因忘缴一年一百来块的域名续费费，域名被别人注册走，访问时已经不是自己的网站；自知官司打不赢，只好花大价钱把域名收购回来。
+
+### 自己注册还是找代理
+
+CNNIC 审批域名是**一批一批地批**，不是一个个批：个人提交申请要排队，时间不确定。代理注册机构每次成百上千个域名一起提交，几天就能批下来。所以自己想注册域名，不建议排队，花个百八十块找机构代办更划算。
+
+## 三、服务器与专业机房
+
+### 服务器和普通计算机不是一回事
+
+- **无显示器运行**：普通 PC（个人计算机）开机自检时若检测不到显示接口的信号，主板可能报错；服务器没有显示器也能正常运行。管理员想了解运行状况，用笔记本电脑通过网络连接服务器查看。
+- **刀片式造型**：服务器做得又薄又扁，像刀片，可以一层层插进机架——特别像把书插进书架。
+- **永不关机**：服务器需要 7×24 小时全天候运行。
+
+### 专业机房的要求
+
+服务器很贵，必须放在专业机房里：**恒温、防尘、防火、防潮、防静电**。
+
+- **恒温**：空调常年开着，约 22～23 ℃。
+- **防潮、防静电——架空层**：在机房地面上打约 1 米高的桩（支架），上面铺防火板；所有网线、电源线都走在架空层下面，检修人员可以爬到下面检查。服务器与地面之间架空，就不会产生静电、也不会受潮。
+
+这样的专业机房一般企业没有，所以产生了**把服务器交给别人管**的需求——三大运营商（电信、移动、联通）都提供机房服务。
+
+## 四、主机托管与虚拟主机
+
+| | 主机托管 | 虚拟主机 |
+|---|---|---|
+| 服务器归属 | 服务器是**你的** | 服务器是**别人的** |
+| 做法 | 放到运营商的专业机房，专人代管 | 一台服务器上划分磁盘空间，多用户共享 |
+| 适合 | 有独立服务器的单位 | 小型公司 / 个人网站：买不起独立服务器、付不起托管费、建不起机房 |
+
+我们最后要做的大型综合实验就是**虚拟主机的搭建**。
+
+### 虚拟主机的原理
+
+在服务器的操作系统上划分出一定的磁盘空间，供用户放置站点和应用组件，所以虚拟主机也叫**网站空间**：一台运行在互联网上的服务器被划分成多台"虚拟"服务器，每台都有自己的域名和完整的 Internet 服务功能。
+
+- 一台服务器上配置**多个域名**，访问者输入不同域名，虚拟主机将其定位到对应的网站内容，互不干扰。
+- **所有域名共享同一个 IP 地址**——多个域名被 DNS 解析到同一个 IP，但访问的是主机上不同的位置。
+- 优点：摆脱硬件资源限制，免去机房维护与管理费用。
+- 缺点：共享环境导致**安全性受限**；**访问量受限**（与租用价格挂钩）。
+- 报价主要按**租用的磁盘空间大小**计费（空间用来安放站点数据），空间与访问量的档位越高价格越贵。
+
+### 托管计费：U、RAID 与带宽
+
+- 计费与**服务器尺寸**和**接入带宽**相关——带宽指单位时间内线路能传输的数据量（如 100Mbps），带宽越宽同时承载的访问越多、网站打开越快，年费越高。三大运营商（SP，服务提供商）价格大同小异，公认中国电信的网络质量稍好。
+- **1U / 4U**：U 是机架服务器的厚度单位，1U 约 4 厘米多；普通服务器 1U 很薄，4U 较厚（10 多公分）。区别在于能插几块硬盘——服务器不像个人 PC 只有一块硬盘。
+- **RAID**（Redundant Array of Independent Disks，独立磁盘冗余阵列）**磁盘阵列**：为保证数据不丢失，多块硬盘当一块用，数据通过算法关联存放（冗余即"多存一份备用"）；只要硬盘**不同时**损坏（如三块坏一块），就能靠剩余硬盘恢复数据。
+- **热插拔**：服务器硬盘支持带电插拔更换，普通计算机硬盘不支持。
+
+## 五、Web 服务的基础概念
+
+### B/S 模式与 C/S 模式
+
+Web 服务采用 **B/S（Browser/Server，浏览器/服务器）** 模式：客户端就是浏览器，操作系统自带，**节约了开发客户端的过程**。而网络上绝大多数应用是 **C/S（Client/Server，客户机/服务器）** 模式，必须单独开发客户端，不同应用开发的客户端各不相同。
+
+| | B/S | C/S |
+|---|---|---|
+| 客户端 | 浏览器（系统自带） | 专用客户端软件 |
+| 开发成本 | 只需开发服务器端 | 客户端、服务器端都要开发 |
+| 例子 | 浏览网页 | 王者荣耀：下载客户端，游戏过程在手机客户端本地运行，评分等数据从服务器获取 |
+
+### 万维网（WWW）
+
+万维网（World Wide Web，三个 W，简称 3W / Web）由欧洲粒子物理实验室（CERN）开发，它提供的服务就是 Web 服务。**万维网不等于因特网**：因特网是美国人开发的网络基础设施，万维网只是其上的一种服务——两者关系详见[第六课时《守护进程与服务管理工具》"拓展：万维网与因特网的关系"](https://neecoo.dpdns.org/2026-10-linux-6/#五拓展万维网与因特网的关系)。
+
+Web 服务是 **Internet 上访问量最大的服务，没有之一**。但 Internet 除了 Web 服务，还提供[第八课时《FTP 服务》](https://neecoo.dpdns.org/2026-10-linux-8/#一ftp-服务概述)、[第九课时《FTP 服务器配置与用户管理》](https://neecoo.dpdns.org/2026-10-linux-9/)讲的 **FTP** 文件传输服务、电子邮件（Mail）服务、P2P（Peer to Peer，点对点——用户之间直接互传文件、不经中心服务器）服务（如迅雷下载）等。结论：**万维网隶属于因特网**，是因特网的一部分。
+
+### URL 不是"网址"
+
+URL 全称**统一资源定位符**（Uniform Resource Locator），由**协议、主机地址（网址/域名）、端口号**三部分组成：
+
+```text
+http://www.example.com:80/index.html
+协议      主机地址（网址）    端口    路径
+```
+
+三部分各自的作用：**协议**规定双方以什么方式通信（`http` 即 HyperText Transfer Protocol，超文本传输协议——浏览器与 Web 服务器之间传送网页所遵守的规则）；**主机地址**定位是哪台服务器；**端口号**区分同一台计算机上的不同服务（80 = Web、21 = FTP、53 = DNS，一台机器靠端口号把流量交给正确的服务）。
+
+所以"网址"只是 URL 的一部分——URL 还包含协议和端口号。这是计算机网络原理课的常见判断/选择题考点。
+
+### 主页（Homepage）
+
+从指定 Web 服务器上获取到的**第一个 Web 文档**叫主页（Homepage，也叫首页）——即访问 `www.taobao.com` 时看到的第一个页面。
+
+## 六、Apache：安装、启停与验证
+
+### Apache 是什么
+
+Linux 下提供 Web 服务要安装 **Apache**。它是一款**免费、开源**的 Web 服务器软件，**跨平台**性好（Unix、Windows、Linux 都能运行）。全称 Apache HTTP Server——"Apache" 谐音 "a patchy server"（充满补丁的服务器）：自诞生起黑客不断为其开发新功能（补丁），使其日益完善。它原适用于小型网站，移植到 Linux 后发展迅速，因扩容能力强成为世界第一的 Web 服务器：据统计 Apache 站点占比 63.16%，微软 IIS（Internet Information Services，Windows 侧自带的 Web 服务器）占 26.85%，其余份额由 Nginx（另一款轻量、高性能的 Web 服务器软件）等提供（阿里、腾讯等大型互联网公司多用 Nginx）。
+
+### 检查是否已安装
+
+安装后会生成名为 **httpd** 的守护进程（http daemon；Red Hat 系里软件包、服务名都叫 httpd，见[第七课时"Web 服务：Apache / httpd"](https://neecoo.dpdns.org/2026-10-linux-7/#web-服务apache--httpd)）。用 `rpm` 查询并过滤：
+
+```bash
+rpm -qa | grep httpd    # -q 查询已安装的包，-a 全部；再经管道用 grep 过滤出含 httpd 的行
+```
+
+结果有 3 个相关包：
+
+| 软件包 | 内容 | 是否必须 |
+|---|---|---|
+| `httpd-manual` | 使用手册 | 必须 |
+| `httpd` | 主程序（Apache 本体） | 必须 |
+| `httpd-tools` | 工具集 | 可选（早期版本无此组件，新版才增设） |
+
+### 用安装光盘安装（老师演示的早期 Red Hat 版本，三张光盘）
+
+许多同学会装最小化版本（约 4.3G，节约磁盘空间）来完成课程学习，最小安装默认没有 httpd，需要手动装。把第一张安装光盘放入光驱（VMware 中即连接 ISO 镜像所在位置）并挂载后，有两种方式：
+
+**图形方式**：通过"添加/删除程序"安装——找到"万维网服务器"，点开细节，把所有选项全部勾选。
+
+**纯文本方式**：
+
+```bash
+mount /dev/cdrom /mnt/cdrom      # 挂载：把光盘设备接到 /mnt/cdrom 目录（挂载点）下才能读取
+cd /mnt/cdrom/Server             # 进入安装包存放目录（老版本光盘为 RedHat/RPMS）
+ls | grep ^httpd                 # 过滤显示以 httpd 开头的安装包名
+rpm -ivh httpd-版本号.rpm         # -i 安装 -v 显示详情 -h 进度条；文件名长，敲开头按 Tab 键补全
+rpm -ivh httpd-manual-版本号.rpm  # 再重复同样过程装手册
+```
+
+早期版本光盘里只有主程序和手册两个 httpd 包，没有工具集。
+
+### 启动、停止与状态查看
+
+| 方式 | 命令 |
+|---|---|
+| SysV 服务管理（RHEL 5/6） | `service httpd start` / `stop` / `restart` / `status` |
+| systemd（CentOS 7+） | `systemctl start httpd`、`systemctl restart httpd`、`systemctl status httpd` |
+| 服务脚本直启 | `/etc/rc.d/init.d/httpd start`（该目录下 httpd 脚本显示为绿色，代表可执行程序） |
+
+- 先用 `ps` 命令确认 httpd 程序已载入进程；
+- `status` 可查看 **PID** 与运行状态，说明服务器工作正常；
+- Web 服务和[第八课时](https://neecoo.dpdns.org/2026-10-linux-8/#匿名访问默认形态)、[第九课时](https://neecoo.dpdns.org/2026-10-linux-9/#一ftp-的目录结构根工作目录与登录点)的 VSFTP 一样，装好就有默认配置，启动即可用。
+
+### 测试验证
+
+1. **配 IP**：给本机配置 IP 192.168.103.128（VMware 虚拟网络）与子网掩码，再用 `ifconfig` 确认配置成功（ifconfig 用法见[第七课时《Linux 网络应用》"ifconfig —— 查看/配置网卡"](https://neecoo.dpdns.org/2026-10-linux-7/#ifconfig--查看配置网卡)）。
+2. **测连通**：用 Windows 客户端 `ping` 该 IP，得到回应说明网络可达。
+3. **关防火墙**（防火墙：按规则检查、放行或拦截进出网络流量的安全屏障；实验中先关掉方便访问，生产环境应配规则放行而不是关闭）：
+
+```bash
+   service iptables stop        # RHEL 5/6
+   systemctl stop firewalld     # CentOS 7+
+   ```
+
+   > ⚠️ **注意**：关闭防火墙仅供实验环境快速验证，生产环境绝不能裸奔——应通过防火墙规则只放行所需端口。
+4. **验证 80 端口**：Web 服务器默认**监听 80 端口**，在本机浏览器输入 `http://192.168.103.128`（或 IP:80）访问，能看到 Apache 的测试页说明 Web 服务正常——测试页就是一个 HTML（HyperText Markup Language，超文本标记语言，编写网页所用的语言）写成的页面。
+5. **反向验证**：执行 `stop` 停止服务后再连 80 端口就连不上了——**服务关闭时，端口同时关闭**。
+
+浏览器看到的默认主页内容是配置文件固定指定的。做完 Web 服务器后接着做 DNS 服务器，到时候要求：HTTP 协议后**不能输入 IP 地址**，必须输入自定义域名，由本机 DNS 服务器翻译成 IP 再访问。
+
+## 七、主配置文件 httpd.conf
+
+### 文件布局与历史演变
+
+| 文件 | 作用 |
+|---|---|
+| `/etc/httpd/conf/httpd.conf` | 主配置文件 |
+| `/etc/httpd/conf/mime.types` | MIME 类型映射表 |
+| `/etc/rc.d/init.d/httpd` | 服务启停脚本（绿色 = 可执行） |
+
+原版 Apache 配置有**四个**文件：`httpd.conf`（主配置）、`access.conf`（访问控制）、`srm.conf`（资源管理）、`mime.types`。新版已把 access.conf 和 srm.conf **并入 httpd.conf**，所有访问控制和资源配置都在主配置文件里完成。
+
+**MIME**（Multipurpose Internet Mail Extensions，多用途互联网邮件扩展）解决浏览器调用插件正确显示音频、视频、图像的问题：装插件时 MIME 就已配好（如邮件附件设为 WPS 打开，也可改用 Microsoft Office），仅此时需要动它，一般保持不变。
+
+### 三大区结构
+
+httpd.conf 比 vsftpd.conf 大得多，修改时难找位置，先在 vi 中执行 `:set number` 显示行号便于定位；前 31 行是简介注释，第 32 行起进入配置区。整个文件分三部分：
+
+1. **全局环境（Global Environment）**——控制 Apache 服务器正常运行的核心参数；
+2. **主服务器配置（'Main' server configuration）**——定义服务所需的参数，处理**未被虚拟主机定义的请求**；为虚拟主机提供默认配置（做第三区实验时第三区有新设置，本区默认值全部失效）；
+3. **虚拟主机（Virtual Hosts）**——见第八节。
+
+### 第一区：全局环境参数
+
+**ServerRoot 与 DocumentRoot——高频易混考点**：
+
+| | ServerRoot | DocumentRoot |
+|---|---|---|
+| 默认路径 | `/etc/httpd` | `/var/www/html`（var 目录下 www 目录下的 html 目录） |
+| 保存内容 | 日志文件、出错文件、访问记录 | **主页文件**（网页、图片） |
+| 谁在用 | 管理员：用笔记本连上服务器，查这些文件了解运行状况 | 浏览器：访问 Web 服务器时被**定位**到这个位置 |
+
+其余全局参数：
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `PidFile` | — | 记录 httpd 启动后的主进程号（PID）：服务一启动，系统分配的进程号记录于此 |
+| `KeepAlive` | Off | 是否允许**持久连接**（一条连接上连续处理多个请求，而不是每个请求都重新建立一次连接）。Web 服务器运行必须提供稳固的连接，要改成 **On** |
+| `MaxKeepAliveRequests` | 100 | 持久连接前提下最多允许的请求数。对大型服务器明显不够，全部改成 **0（无限制）**，多少人上网都可以 |
+| `Timeout` | 120（课堂按 15 秒讲解；另有一个 `KeepAliveTimeout`——持久连接的超时，默认恰为 15 秒，两者易混） | 连接请求未获响应时的重试等待。几乎没用——首次连接报 404 或白屏时按回车刷新就是手动重置，没人会傻等，设不设都行 |
+| `MinSpareServers` | 5 | 最少**备用**进程数 |
+| `MaxSpareServers` | 20 | 最多备用进程数 |
+
+每个服务器都要留**备用进程（Spare Servers）**，防止突发的连接激增：不能把所有进程资源都用于服务，否则突发状况一来，别人的连接就过不来。一般紧急连接也就几个，不会超过 20。
+
+| 参数 | 示例 | 说明 |
+|---|---|---|
+| `Listen` | `Listen 192.168.103.128:80` | 设置服务器的 IP 地址与监听端口号；Web 服务器端口为 **80** |
+
+### 第二区：主服务器配置
+
+- **运行用户与组（User / Group）**：默认 `User apache`、`Group apache`。为提升安全性，实验要求改为 **`User nobody`、`Group nogroup`**——nobody 是系统中级别最低的用户（仍是系统用户）：降低服务运行权限，即使服务被攻破，攻击者也只拿到最小权限的身份。
+- **ServerAdmin**（管理员邮箱）：Web 服务器出现异常差错时向管理员发电子邮件。此项可选——自建的域（一台 Web 服务器 + 一台 DNS 服务器构成的域）里**没有邮件服务器**，配了也发不出邮件。像 QQ 邮箱那样的大域才有自己的 Web、DNS、邮件、游戏服务器，可以向外转发电邮。
+- **ServerName**：默认站点的名字。做虚拟主机实验时，这里的默认值失效，改用第三区每个虚拟主机各自的域名。
+- **默认主页位置**：系统的默认主页存放在 `/var/www/html`（即 DocumentRoot），其内容是 **Apache 测试页**。做虚拟主机实验的第一步，就是把默认主页位置相关行前面加 `#` **注释掉**——虚拟主机要为每个域名单独设计主页，不能再用系统默认主页，主页得自己用 HTML 写（很简单）。Apache 默认识别的主页文件名是 `index.html`（由 `DirectoryIndex` 指令指定）——自己写的主页文件**必须叫这个名字**，名字不对访问时不会显示。
+- **日志**：Apache 有两类日志，都存在 ServerRoot 下的 logs 目录——`access_log` 访问日志（哪个客户端、何时、请求了什么）与 `error_log` 错误日志（服务器运行出错记录，排错先看它）。`LogLevel` 控制记录详略，从详到略有 debug、info、notice、warn、error、crit、alert、emerg 等级，默认 **warn**（只记警告及以上）。`HostnameLookups` 决定访问日志里记客户端的**主机名还是 IP**：默认 Off 记 IP（省去反查 DNS 的开销，也更高效）——课堂要求"修改配置以记录客户端 IP 地址"，即保持该项关闭。
+- **文件类型处理**：GIF 动画、HTML 文件、PDF、压缩包等不同类型文件的处理方式，由 MIME 类型映射（mime.types）定义，用默认设置即可。
+- **安全收口（考点）**：
+  - 不使用代理服务器，代理相关控制与代理缓存均不启用；
+  - 关闭协议与版本信息显示：`ServerTokens` 默认 Full——显示完整操作系统版本等服务器特征。HTTP 协议分 1.1 和 2.0 版本，黑客常利用已知协议漏洞攻击，所以**在配置里搜 `Prod`，把 `ServerTokens Full` 改为 `ServerTokens Prod`**，对外只显示最少信息；错误页上的版本签名（ServerSignature）同样置 Off。
+
+## 八、虚拟主机
+
+虚拟主机把一台计算机模拟成多台主机，每台都有**独立域名**和完整的网络功能。实际管理中管理员只有一台计算机、一个 IP，却要实现多个网站——就必须有多个域名，**想实现几个域名，就得创建几个 VirtualHost（虚拟主机）**。
+
+### 两种实现方式
+
+| 方式 | 域名与 IP 的关系 |
+|---|---|
+| **IP-Based**（基于 IP） | 一个域名对应一个 IP 地址 |
+| **Name-Based**（基于域名） | **多个域名对应同一个 IP 地址** |
+
+只有一台计算机、一个 IP，所以我们要做的虚拟主机实验是 **Name-Based**。
+
+### 配置示例
+
+一台 Web 服务器（IP 为 210.43.118.123）划分成两个虚拟主机：以 `<VirtualHost IP地址>` 开头、后面跟上这台主机的 IP，每个域名写一段：
+
+```apache
+# Apache 2.2 需先声明基于域名的虚拟主机（2.4 已取消该指令）
+NameVirtualHost 210.43.118.123
+
+<VirtualHost 210.43.118.123>
+    ServerName www.office.usc.com
+    DocumentRoot /var/www/html/office
+</VirtualHost>
+
+<VirtualHost 210.43.118.123>
+    ServerName www.computer5.cn
+    DocumentRoot /var/www/html/computer5
+</VirtualHost>
+```
+
+两台虚拟主机 IP 相同（210.43.118.123），但域名不同：
+
+- 第一个域名 `www.office.usc.com` 的主页文件**单独创建**，存放在 `/var/www/html/office`，访问者访问该域名时被定位到这个目录；
+- 第二个域名 `www.computer5.cn` 的主页放在另一个目录（如 `/var/www/html/computer5`），浏览器访问它时定位到那里；
+- **两个域名的主页存放位置不能相同**，所以看到的内容完全不同、互不干扰——这就是虚拟主机的实现方式。
+
+每个域名的主页都要自己用 HTML 写一个。配置完成后，两个域名都能访问成功，实验就完成了（具体要求见文末"实验与考试要求"）。
+
+## 九、DNS 域名系统
+
+### 从计算机名到 IP 地址
+
+人类能识别 `www.taobao.com` 这样的域名，计算机只认 IP 地址——DNS 负责把域名"翻译"成 IP 地址（[第七课时"DNS 服务：bind / named"](https://neecoo.dpdns.org/2026-10-linux-7/#dns-服务bind--named)已见 bind/named 与 resolv.conf 的用法，本课讲原理）。两台计算机在同一个网络就像在同一个房间；在不同网络就是不同空间，跨空间访问就需要 DNS——例如从新浪邮箱发邮件到 QQ 邮箱，必须用 DNS 解析 QQ 的域名。
+
+计算机名转 IP 地址有三种方案：
+
+| 方案 | 适用范围 | 特点 |
+|---|---|---|
+| **Hosts 文件** | 小型局域网 | 纯文本的 IP↔名字对照表（Linux 中即 `/etc/hosts`），通常由管理员手工建立维护 |
+| **WINS 系统** | 中型企业 | WINS（Windows Internet Name Service），Windows 网络专用的名字解析服务 |
+| **DNS** | Internet 上**只能**用它 | 主机数量巨大，只有 DNS 是**分布式系统**，其他两种扛不住巨大负载 |
+
+所谓**分布式**：全球没有一台唯一的"总服务器"，而是无数台 DNS 服务器各管一片、按层级互相协作——任何一台出问题都不影响整体解析，因此才扛得住 Internet 规模的海量主机。
+
+### DNS 的三大部分（填空考点）
+
+DNS（Domain Name System，域名系统）这个"系统"包含三大部分——**域名服务器（DNS 服务器）只是其中之一，不是全部**：
+
+1. **域名空间**：域名的树状结构、层级划分及取值定义；
+2. **域名服务器**：最重要的组成部分，其掌控范围称为**区（zone）**——类似"辖区"，指一台域名服务器实际负责的那一片域名范围；
+3. **解析器**：负责将域名翻译成 IP 地址，并把查询结果传递给客户端。
+
+### 发展简史
+
+DNS 由保罗·莫卡派乔斯（Paul Mockapetris）于 **1983 年**发表，原始文档是 RFC 882 和 RFC 883（RFC：Request For Comments，互联网技术标准与协议的正式说明文档，编号是它的"身份证号"）；**1987 年**升级为 RFC 1034 和 RFC 1035 方案，主要改动是去掉了域名末尾的点——原来要写 `www.sina.com.cn.`（末尾带点的完全限定域名 FQDN），现在根域（域名树最顶端的那个 `.`）由系统默认补上，无需手动输入。
+
+### 域名层级：个性化出现在第几级（选择考点）
+
+域名空间自上而下：**根域 → 顶级域（一级域）→ 二级域 → 三级域……**
+
+以 `www.sina.com.cn` 为例：
+
+| 层级 | 本例取值 | 含义 |
+|---|---|---|
+| 顶级域（一级域） | `cn` | 按国家/地区分类，CN 代表中国 |
+| 二级域 | `com` | 按性质分类，com 代表商业 |
+| 三级域 | `sina` | **机构自己的名字** |
+
+**考点**：哪一级开始出现个性化色彩？——**第三级**（即倒数第三层）才显示注册机构自己的名字。考试选择题选"第三级"。
+
+### 13 台根服务器
+
+全世界共有 **13 个根服务器**。绝大多数分布在美国——因为 DNS 和 Internet 都是美国人发明的，多数解析在美国完成；亚太地区只有一个，在日本**东京**；欧洲有两个，分别在英国**伦敦**和**法国**。
+
+---
+
+## 实验与考试要求
+
+- **环境准备**：实验用 VMware（课堂演示 IP 为 192.168.103.128），NAT 模式与关闭防火墙的做法参见[第八课时"实验环境要求"](https://neecoo.dpdns.org/2026-10-linux-8/#五实验环境要求)与[第九课时"实验与考试要求"的环境准备](https://neecoo.dpdns.org/2026-10-linux-9/#七实验与考试要求)。
+- **整体架构**：Web 服务器和 DNS 服务器搭建在**同一台 Red Hat** 操作系统计算机上，分别设置 IP（两个 IP 可以相同——既是 Web 服务器又是 DNS 服务器，没有关系）。给 Web 服务器设置域名，DNS 服务器的作用是把该域名解析为 Web 服务器的 IP：例如设置域名 `adc.com`，输入 `www.adc.com` 就能访问到 Web 服务器的页面。
+- **避开域名撞车**：自定义域名若与互联网上某真实网站重名，而浏览器曾访问过那个真网站并留下缓存，再输入同名域名时得到的可能是缓存页面而不是本机页面。两个对策：
+  1. 域名**个性化**：用自己名字的拼音全称加数字，保证不重名；
+  2. 把计算机置于**纯内网**（不接外网），从物理上杜绝缓存干扰。
+- **DNS 验证要求**：测试时 HTTP 协议后不能输 IP 地址，必须输入自定义域名，由本机 DNS 服务器解析成 IP 完成访问。
+- **虚拟主机实验内容**：包含两个自定义域名，为每个域名各写一个 HTML 主页（先注释掉默认主页配置）——**第一个域名的主页显示专业班级（物联网工程本 24103 班），第二个域名的主页显示学号和姓名**；两个主页都访问成功，实验即完成。
+
+### 综合实验步骤（Web + DNS 同机）
+
+命令序列按课堂实验要求整理。示例域名 `zhangsan123.com`（实际用自己姓名拼音全称 + 数字），服务器 IP 以 192.168.103.128 为例，前提是 Web 服务本身已按第六节验证可用。
+
+**第 1 步：搭 DNS——把两个域名解析到本机 IP**
+
+```bash
+rpm -qa | grep bind     # 检查 DNS 软件是否已装（软件包 bind，守护进程名为 named）
+```
+
+没装则按第六节的光盘安装方法先装 bind。然后编辑主配置 `/etc/named.conf`，添加自己的正向区域（区域 zone 即一台域名服务器负责的一片域名范围）：
+
+```text
+# /etc/named.conf 追加
+options {
+    directory "/var/named";     # 区域文件的存放目录
+};
+zone "zhangsan123.com" IN {     # 你的域名
+    type master;                # 主区域：本服务器对该域权威负责
+    file "zhangsan123.zone";    # 区域数据文件（在 /var/named 下自建）
+};
+```
+
+再创建区域文件 `/var/named/zhangsan123.zone`，给两个域名各写一条 A 记录（A 记录就是"域名 → IP"的对照行；zone 文件里注释用 `;`）：
+
+```text
+$TTL 86400
+@       IN SOA  zhangsan123.com. root.zhangsan123.com. (
+        2026101701  ; 序列号：每次改过文件就手工加 1
+        28800 14400 3600000 86400 )
+@       IN NS   dns.zhangsan123.com.
+dns     IN A    192.168.103.128
+www1    IN A    192.168.103.128     ; 第一个域名
+www2    IN A    192.168.103.128     ; 第二个域名
+```
+
+启动 DNS 服务，并让本机用自己解析：
+
+```bash
+service named start
+vi /etc/resolv.conf             # 写入 nameserver 192.168.103.128（指向本机）
+nslookup www1.zhangsan123.com   # 应返回 192.168.103.128
+```
+
+Windows 测试机也要把网卡的 DNS 服务器改成 192.168.103.128。
+
+**第 2 步：配置 Apache 虚拟主机**
+
+```bash
+vi /etc/httpd/conf/httpd.conf   # 打开主配置文件
+:set number                     # 显示行号便于定位
+# ① 注释掉默认主页（DocumentRoot）相关行——行首加 #
+# ② 文件末尾（第三区 Virtual Hosts）写入下面两段
+```
+
+```apache
+NameVirtualHost 192.168.103.128:80
+
+<VirtualHost 192.168.103.128:80>
+    ServerName www1.zhangsan123.com
+    DocumentRoot /var/www/html/site1
+</VirtualHost>
+
+<VirtualHost 192.168.103.128:80>
+    ServerName www2.zhangsan123.com
+    DocumentRoot /var/www/html/site2
+</VirtualHost>
+```
+
+**第 3 步：建目录、写主页、重启**
+
+```bash
+mkdir -p /var/www/html/site1 /var/www/html/site2
+vi /var/www/html/site1/index.html    # 主页文件名必须是 index.html
+vi /var/www/html/site2/index.html
+service httpd restart
+```
+
+主页用最简 HTML 即可，第一个域名的主页示例：
+
+```html
+<html>
+<body>
+  <h1>物联网工程本 24103 班</h1>
+</body>
+</html>
+```
+
+第二个主页把 `<h1>` 里的内容换成自己的学号和姓名。
+
+**第 4 步：验证**
+
+浏览器分别访问 `http://www1.zhangsan123.com` 与 `http://www2.zhangsan123.com`：第一个显示专业班级、第二个显示学号姓名——两个主页都访问成功，实验完成（DNS 测试时 HTTP 协议后不能输 IP 地址，必须输域名）。
+
+**常见错误排查**
+
+- 访问两个域名显示的是同一个站 → 忘了写 `NameVirtualHost`（Apache 2.2 必需），所有请求都落进第一个 VirtualHost；
+- 报错或显示目录列表 → 主页文件名不是 `index.html`，或 DocumentRoot 写的目录与 mkdir 建的不一致；
+- `nslookup` 查不到域名 → 区域文件里域名末尾少写了点、named 没重启、或 `/etc/resolv.conf` 没指向本机；named 报错看 `/var/log/messages`；
+- 访问到的不是自己的页面 → 自定域名与公网真实域名撞车被浏览器缓存劫持，换成个性化域名；
+- 任何配置改动后都要 `service httpd restart` / `service named restart` 才生效。
+
+---
+
+## 本课重点速记
+
+1. 建站流程：注册域名 → 服务器（自建/托管/虚拟主机）→ 静态或动态网站（动态连数据库）→ 开带宽 → 部署主页代码数据库 → 启动服务 + 防火墙 + 数据备份。
+2. 域名只能租不能买断，到期不续费即被收回；CNNIC 一批一批审批，个人排队慢，花百八十块找代理几天办好。抢注案例：少林寺、派克（先到先得，官司也赢不了）、FM365（忘续费丢域名）。
+3. 服务器 vs PC：无显示器可运行（管理员用笔记本联网查看）、刀片式插机架、7×24 不关机；机房要求恒温（22～23 ℃）防尘防火防潮防静电，架空层（约 1 米桩 + 防火板，线走下面）防潮防静电。
+4. 主机托管 = 服务器是你的、放运营商机房专人代管；虚拟主机 = 服务器是别人的、多用户共享一台（网站空间），多域名共享同一 IP、内容互不干扰；优点省硬件省维护，缺点安全性受限、访问量受限。
+5. 计费看尺寸与带宽：1U ≈ 4 厘米厚，4U 能插更多硬盘；RAID 多盘当一盘用（不同时坏即可恢复），服务器硬盘支持热插拔；公认电信网络质量稍好。
+6. Web 服务 = B/S 模式（浏览器做客户端，省开发）；C/S 要单独开发客户端（如王者荣耀）。万维网（WWW，CERN 开发）≠ 因特网（美国），万维网隶属因特网；Web 服务是 Internet 访问量最大的服务，没有之一。
+7. URL = 统一资源定位符 = 协议 + 主机地址（网址）+ 端口号，网址只是其中一部分；访问 Web 服务器获取的第一个文档 = 主页（Homepage）。
+8. Apache：免费开源跨平台，"a patchy server"（充满补丁），市占 63.16% 第一（IIS 26.85%、Nginx 服务阿里腾讯等大厂）；RHEL 中软件包/服务名是 httpd。
+9. `rpm -qa | grep httpd` 三包：httpd-manual（手册，必须）、httpd（主程序，必须）、httpd-tools（工具集，可选）。光盘安装：挂载后进 Server 目录，`rpm -ivh` 装主程序和手册。
+10. 启停：`service httpd start/stop/restart/status`（或 systemctl、`/etc/rc.d/init.d/httpd` 脚本）；默认监听 80 端口，浏览器访问 IP 出 Apache 测试页即正常；服务关闭则端口同时关闭。
+11. httpd.conf 三大区：全局环境 / 主服务器配置（虚拟主机的默认值）/ 虚拟主机；原四文件（httpd.conf、access.conf、srm.conf、mime.types）新版已并入主配置；MIME = 多用途互联网邮件扩展，管浏览器按类型调插件显示。
+12. **ServerRoot `/etc/httpd` 存日志出错记录（管理员看）vs DocumentRoot `/var/www/html` 存主页文件（浏览器定位）——高频易混**。
+13. 全局参数：KeepAlive 改 On（持久连接）；MaxKeepAliveRequests 100 → 大型服务器改 0 无限制；MinSpareServers 5 / MaxSpareServers 20（备用进程防突发）；Listen IP:80；PidFile 记录主进程号。
+14. 主服务器区：User/Group 改 nobody/nogroup 降权提安全；ServerAdmin 配了也发不出（自建域无邮件服务器）；做虚拟主机先注释掉默认主页配置，每域名自己写 HTML 主页；安全收口 `ServerTokens Full → Prod`。
+15. 虚拟主机：IP-Based 一域名一 IP，Name-Based 多域名一 IP（实验用）；几个域名写几个 `<VirtualHost IP>` 块，各自 ServerName + DocumentRoot（目录不能相同），2.2 先写 NameVirtualHost；主页文件名必须是 index.html（DirectoryIndex 指定）。
+16. DNS 三大部分（填空）：域名空间（树状层级）、域名服务器（掌控范围为区 zone）、解析器（域名翻译成 IP）；1983 年莫卡派乔斯发表，RFC 882/883 → 1987 年 RFC 1034/1035（去掉末尾的点）。
+17. 名字解析三方案：Hosts（小局域网手工维护）、WINS（中型企业）、DNS（Internet 唯一，分布式）；13 个根服务器绝大多数在美国，亚太 1 个在东京，欧洲 2 个在伦敦和法国。
+18. 层级考点：个性化色彩从**第三级**（倒数第三层）开始——cn（顶级）→ com（二级）→ sina（三级，机构自己的名字）。
+
+---
+
+## Linux操作系统-课堂笔记 课时9
+
+- **URL**: https://neecoo.dpdns.org/2026-10-linux-9/
+- **Published**: 2026-10-13
+- **Category**: 笔记
+- **Tags**: 学习, 笔记, linux
+
+## 一、FTP 的目录结构：根、工作目录与登录点
+
+**FTP 服务器的根**指 FTP 服务器的最顶层目录：到它这里就无法再向上，只能向下访问。它的绝对路径是 `/var/ftp/`。注意区分：它不是 Linux 文件系统的根 `/`——文件系统的根由系统给出，而 FTP 根是 FTP 服务自己的"天花板"。
+
+**FTP 专用工作目录**是根下的 `/var/ftp/pub/`（pub 即 public，公共目录）：存放供下载的资源，用户上传的资源也只能传到这里。管理员把共享文件放进 pub，客户端登录后进入 pub 下载。
+
+未经任何配置的 vsftpd 就是一台**匿名访问的 FTP 服务器**——仅允许匿名用户登录和下载（参见第八课时《FTP 服务》）。
+
+**登录点**指用户登录成功后 pwd 所在的默认目录，两类用户的登录点不同：
+
+| 用户类型 | 登录点 |
+|---|---|
+| 匿名用户 | `/var/ftp` |
+| 本地用户 | `/home/用户名`（用户的宿主目录/家目录） |
+
+本地用户的登录点是家目录：创建用户时系统会在 `/home` 下生成同名文件夹，用本地用户登录 FTP 后就落在这里。
+
+## 二、ftp 客户端命令与本地工作目录
+
+### 本地工作目录
+
+**本地工作目录**指：从服务器下载的资源在本地存放的位置，也是向服务器上传资源时的本地起点。
+
+登录 ftp 前必须先建好它。Windows 下 cmd 启动时默认位置是当前用户目录（如 `C:\Users\用户名`，以管理员运行时是 system32 目录）——若不建工作目录，从哪个目录启动 cmd 并登录，下载的文件就落在哪，事后很难找。所以做实验或考试时，**先创建本地工作目录是得分点**：
+```bat
+d:
+md test          :: 在 D 盘建工作目录（也可右键新建文件夹）
+cd test
+dir /w           :: /w 宽屏横排显示，确认目录建好
+```
+
+以后从服务器下载的文件全部落在本地工作目录，上传也从这里找文件——**从哪个本地目录登录，下载就存到哪**。
+
+### 登录
+
+```bat
+ftp 210.43.91.186    :: 后跟 FTP 服务器地址
+```
+
+未配置的服务器只允许匿名访问。匿名用户有一个专用用户名 **anonymous**（并非"没有名字"），密码为空，提示输密码时直接回车。若改用其他用户名登录，服务器会以"530 仅允许匿名访问"一类提示拒绝并断开。本地用户则输入系统用户名和密码。
+
+登录成功后提示符变为 `ftp>`，之后的命令都在这个提示符下敲。
+
+### 常用命令
+
+| 命令 | 作用 |
+|---|---|
+| `dir` | 列出当前目录，等价于 `ls -l`：显示详细信息（权限、大小、名字）；权限开头是 `d` 的为目录。直接敲 `ls` 则只显示名字，无权限等细节 |
+| `pwd` | 显示当前在 FTP 服务器上的位置。匿名登录显示 `/`——这是 **FTP 服务器的根**，不是文件系统根 |
+| `cd pub` | 切换服务器上的目录，提示 directory successful |
+| `!命令` | 感叹号前缀 = **本地操作**：`!dir` 列出的是本地当前目录的内容，不是服务器的 |
+| `lcd 路径` | local change directory，切换**本地**工作目录（cmd 的工作目录），如 `lcd D:\test`；切完用 `!dir` 核对 |
+| `get 文件` | 从服务器下载文件到本地工作目录 |
+| `get 文件 新名` | 下载并重命名——**要指定下载位置时，必须连新文件名一起给**（第二参数是本地文件名，不能只给路径）；更省事的做法是先 `lcd` 切到目标目录再 get |
+| `put 文件` | 把本地文件上传到服务器当前目录 |
+| `open IP` | 断开当前连接、连另一台服务器 |
+| `?` | 列出该 ftp 客户端支持的全部命令 |
+
+下载与重命名示例：
+
+```bat
+ftp> cd pub                      :: 进入服务器的公共工作目录
+ftp> get 1.txt                   :: 下载到本地工作目录
+ftp> get 1.txt new1.txt          :: 下载并改名
+ftp> lcd D:\test                 :: 本地目录切错了可随时补切
+```
+
+> **注**：Linux 与 Windows 的文本换行符不同（Linux 是 LF，Windows 是 CRLF），跨平台传文本文件后用记事本打开可能看到换行异常，内容本身没有损坏。这与第五节 `ascii_upload_enable` 等参数相关。
+
+### 从状态码看传输成败
+
+FTP 对每步操作都返回三位数字状态码，首数字分类：**2 开头成功**（如 226 表示关闭数据连接、文件动作完成），**5 开头失败**（如 530 登录失败、550 权限拒绝）。FTP 传命令走 21 端口的控制连接、传文件走 20 端口的数据连接，所以上传被拒时会出现"命令回显正常、文件却没传上去"的现象——命令在控制连接上送达了，数据连接上的传输被服务器拒绝。
+
+## 三、匿名上传：配置开关与目录权限两道门槛
+
+### 门槛一：打开配置开关
+
+未配置的服务器上 `put` 上传会被拒绝，第一道门槛是上传功能没开。用 vi 打开主配置文件 `/etc/vsftpd/vsftpd.conf`：装好时只有 `anonymous_enable=YES` 一行未注释（生效），其余行都以 `#` 注释着。去掉以下几行行首的 `#`：
+
+```bash
+anonymous_enable=YES         # 允许匿名登录（原本已生效）
+local_enable=YES             # 允许本地用户登录——考试必写，一字不差
+write_enable=YES             # 写操作总开关：上传、删除、建目录都归它管，对匿名和本地用户都生效
+local_umask=077              # 本地掩码，与 local_enable 搭配，控制本地上传文件的初始权限
+anon_upload_enable=YES       # 允许匿名上传
+anon_mkdir_write_enable=YES  # 允许匿名在 pub 下再创建子目录
+```
+
+配置改完必须重启服务加载：
+
+```bash
+service vsftpd restart
+```
+
+### 门槛二：目录权限
+
+开关打开后 `put` 仍失败——用 `ll /var/ftp` 看 pub 的权限是 `drwxr-xr-x`（755）：只有属主 root 有写权限 `w`，匿名用户（映射为 ftp 用户）属于"其他人"，无法写入。把公共目录放开：
+
+```bash
+chmod 777 /var/ftp/pub
+```
+
+之后再 `put` 即上传成功，回到服务器 `/var/ftp/pub` 下 `ls -l` 可见新文件。
+
+> ⚠️ **注意**：777 全开放权限仅限实验环境。全开放目录除了能被写入，还有更大的安全隐患——它不能用作登录点（见第四节）。
+
+## 四、本地用户：登录点与锁定
+
+### 本地用户的登录点
+
+本地用户用系统用户名和密码登录（如 test2），`pwd` 显示登录点在 `/home/test2`——家目录。此时 `put` 上传的文件默认落在**自己的家目录**，而不是 pub 公共目录，这与"匿名落在 `/var/ftp`"是同一个道理：登录点决定默认读写位置。
+
+问题在于：本地用户登录后可以 `cd /` 一路向上回到文件系统根，进而浏览服务器上所有文件（限制前可访问一切）——这极不安全，必须把本地用户**锁**在指定目录里。
+
+### 锁定三句（考试必写）
+
+```bash
+# /etc/vsftpd/vsftpd.conf
+local_root=/var/ftp       # 本地用户登录后的默认登录点——考试和实验都必须写 /var/ftp
+chroot_local_user=YES     # 把登录后的位置锁死为顶层，禁止再向上穿越目录
+anon_root=/var/ftp        # 匿名用户登录点也统一到 /var/ftp，两类用户登录点保持一致
+```
+
+chroot 即 change root：把用户能看到的"根"改到指定目录，出了这个目录哪儿也去不了。三句里的路径都写 `/var/ftp`，这是实验和答题的统一要求。
+
+**错误示范（不要这样做）**：把登录点直接设成工作目录，如 `local_root=/var/ftp/pub`——不行。pub 是 777 全开放权限目录，**具有全开放权限的目录作为登录点是不安全的**；vsftpd 也会因"chroot 内存在可写根目录"报错拒绝工作。登录点只能写 `/var/ftp`。
+
+改完 `service vsftpd restart`，重新登录验证：
+
+- `pwd` 显示 `/`（被锁后的登录点，而非原来的 `/home/test2`）；
+- `cd /` 试图向上，提示切换失败——**锁定成功**。实验时截图这条失败提示作为证据。
+
+### 只锁一部分用户：chroot_list
+
+上面的 `chroot_local_user=YES` 会锁住**所有**本地用户。若只想锁一部分、放行另一部分，启用 chroot 名单：
+
+```bash
+chroot_list_enable=YES                       # 启用 chroot 名单
+chroot_list_file=/etc/vsftpd/chroot_list     # 名单文件（自建，一行一个用户名）
+```
+
+名单与 `chroot_local_user` 组合的语义：
+
+| chroot_local_user | chroot_list 的作用 |
+|---|---|
+| YES（全锁） | 名单内的用户是**例外**，不锁；名单外全部锁死 |
+| NO（不锁） | 只锁名单**内**的用户 |
+
+### 黑白名单收口（考试要求）
+
+本地用户部分的第二个考点是**黑白名单机制**：`userlist_enable=YES` + `userlist_deny=NO` 启用白名单（配置方法参见第八课时《FTP 服务》）。把 `/etc/vsftpd/user_list` 里系统自带的用户行全部注释，只保留允许登录的用户——名单外的用户一律拒绝登录。
+
+考试对本地用户的完整要求是两条：**一是锁定本地用户登录点，二是启用黑白名单**——允许访问的用户都写进白名单，且全部被锁死在指定位置，不放开任何人。
+
+## 五、欢迎信息与常用参数
+
+**欢迎信息文件 `.message`**：只能写在登录点上（登录点是哪个目录就放哪个目录），是隐藏文件（文件名以 `.` 开头默认不可见），内容随意，如写一行 welcome。用户登录到该目录时即可看到。查看它要用 `ls -a`（显示隐藏文件）。
+
+vsftpd.conf 里其他常用参数：
+
+| 参数 | 作用 |
+|---|---|
+| `max_clients=N` | 最多允许多少个客户端同时连接服务器 |
+| `ftpd_banner=文字` | 登录时向客户端显示的欢迎/说明信息 |
+| `ascii_upload_enable=YES` | 允许以 ASCII 方式上传文本文件 |
+| `ascii_download_enable=YES` | 允许以 ASCII 方式下载文本文件（这两行默认被注释，即只用二进制模式传输） |
+| `idle_session_timeout=秒数` | 空闲超时：默认 300 秒（5 分钟）内无任何命令和数据传输就断开连接。写实验报告一旦超过 5 分钟就掉线重连，建议改成 3000 或 30000 |
+
+## 六、虚拟用户（虚拟账号）
+
+### 为什么需要虚拟用户
+
+本地用户就是系统账号：访问的人多了，逐个创建系统账号既麻烦又给系统留一堆真实用户；匿名用户则相反，无法限制人员，谁都能访问。虚拟用户在两者之间取平衡：**系统里只有一个合法的映射身份，为它创建若干"分身"账号对外发放**——分身各有用户名和密码，但无论谁用分身登录，真实身份都是同一个映射账号。
+
+例如：映射账号 vftpuser 是唯一合法身份；给它建分身 vuser1（密码 123456）、vuser2（密码 147258），两个分身都能登录 FTP，落到系统里的身份都是 vftpuser。
+
+### 配置七步
+
+**第 1 步：创建映射账号**（不是供人操作系统的账号，仅用于登录 FTP 做映射）：
+
+```bash
+useradd -s /sbin/nologin vftpuser
+```
+
+`-s /sbin/nologin` 指定该用户的 shell 为 nologin——它无法登录系统，纯粹作为虚拟用户的映射身份（有的教程还会加 `-d` 给它指一个形式上的家目录，仅作占位，无实际用途）。
+
+**第 2 步：创建虚拟口令库文件** `/etc/vsftpd/vuser.txt`：
+
+```
+vuser1
+123456
+vuser2
+147258
+```
+
+奇数行是账号、偶数行是该账号的密码。它是纯 ASCII 文本文件，**本身不能参与认证**，要转换成数据库文件才行。
+
+**第 3 步：用 db_load 转成哈希数据库**：
+
+```bash
+db_load -T -t hash -f /etc/vsftpd/vuser.txt /etc/vsftpd/vuser.db
+```
+
+`-f` 指定源文本文件，`-T -t hash` 指定载入为哈希型数据库，生成的 `vuser.db` 才是能用于认证的数据文件。
+
+**第 4 步：收紧数据库文件权限**：
+```bash
+chmod 600 /etc/vsftpd/vuser.db
+```
+
+去掉全部执行属性，只留文件属主读写，其他人什么都不许——口令数据库的常规处理。
+
+**第 5 步：建立 PAM 认证文件**。PAM（Pluggable Authentication Modules，可插拔认证模块）是 Linux 的认证框架：每个服务的认证策略是 `/etc/pam.d/` 下的一个文件，`/etc/pam.d/vsftpd` 就是 vsftpd 默认的认证文件（打开看看即可，内容不改）。新建一个认证文件 `/etc/pam.d/vsftpd.vu`，写入两行：
+
+```
+auth     required     pam_userdb.so     db=/etc/vsftpd/vuser
+account  required     pam_userdb.so     db=/etc/vsftpd/vuser
+```
+
+含义照写即可，暂不必深究：两行都调用 pam_userdb 模块去读第 3 步的数据库做认证（`db=` 后写文件路径但**不带 `.db` 后缀**），auth 管验证身份、account 管账户状态。
+
+**第 6 步：在 vsftpd.conf 中启用虚拟账号**，加入三句：
+
+```bash
+guest_enable=YES            # 启用来宾（虚拟）账号机制
+guest_username=vftpuser     # 来宾统一映射到的真实系统身份
+pam_service_name=vsftpd.vu  # PAM 认证改用刚建的 vsftpd.vu 文件
+```
+
+**第 7 步：`service vsftpd restart` 重启生效。**
+
+### 启用后的两个现象
+
+1. **所有本地用户全部登录失败**——包括原本在白名单里的用户。因为认证已切换到 vsftpd.vu，系统只认映射账号体系，本地用户的口令不再被接受。
+2. 用分身 **vuser1 登录成功**。
+
+还有最后一步不能漏：**把分身账号名（vuser1、vuser2，而不是 vftpuser 本身）写进 user_list 白名单**，否则虚拟用户仍会被白名单挡在门外。填的是分身名——白名单管的是"谁来登录"，来登录的正是分身。
+
+### 两个常见错误
+
+1. 在登录点 `/var/ftp` 下再单独创建目录当"虚拟用户的家"——多此一举。登录点就是 `/var/ftp`，不需要任何自建目录。
+2. 把登录点权限从 755 改成 700——错误。目录必须有执行权限 `x` 才能进入，改成 700 后连目录都 cd 不进去。保持默认 755，不要动。
+
+## 七、实验与考试要求
+
+- 环境准备：VMware 用 NAT 模式、关闭 iptables 与 SELinux——做法参见第八课时《FTP 服务》的"实验环境要求"；动手前先确认网络状态正常。
+- 本实验分三个任务：
+  1. **任务一**：匿名用户的登录、上传、下载（重点命令：`ls`/`dir`、`cd`、`!`、`lcd`、`get`、`put`，登录/上传/下载/覆盖都要练）；
+  2. **任务二**：本地用户的登录、上传、下载（重点解决两件事：锁定本地用户登录点、启用黑白名单）；
+  3. **任务三**：虚拟用户的登录、上传、下载（登录按第六节配置，上传下载自行完成）。
+- **考试版本是任务二**（本地用户的登录上传下载）。评分逐点踩分：每个步骤对应明确的得分点，命令与配置必须一字不差（如 `vi /etc/vsftpd/vsftpd.conf` 去掉 `local_enable=YES` 前的 `#`），踩中才给分。
+- 必做得分点：实验开始先创建本地工作目录；锁定三句的路径一律写 `/var/ftp`。
+- 实验留证：锁定成功后 `cd /` 失败的提示等证明性输出要截图放进实验报告。
+- 防掉线：把 `idle_session_timeout` 改大（3000 或 30000），避免写报告超过 5 分钟被服务器踢下线。
+
+---
+
+## 本课重点速记
+
+1. FTP 根 = `/var/ftp`（匿名登录点，最顶层无法再向上）；本地用户登录点 = 家目录 `/home/用户名`；公共工作目录 `/var/ftp/pub`：下载资源放这，上传也只能传这。
+2. 未配置的 vsftpd = 匿名服务器，anonymous 登录（密码直接回车），只能登录和下载。
+3. 本地工作目录：下载落地/上传起点；从哪个目录登录就下到哪；实验考试先建它（得分点）。
+4. ftp 客户端：`dir`=`ls -l`、`pwd`、`cd`、`get 文件 [新名]`、`put`、`lcd` 切本地目录、`!命令` 本地执行、`?` 列全部命令；指定下载位置必须连文件名一起给。
+5. 状态码首数字 2 成功、5 失败；命令走 21 控制连接、文件走 20 数据连接。
+6. 开匿名上传两道门槛：去注释五句（anonymous_enable、local_enable、write_enable、local_umask=077、anon_upload_enable、anon_mkdir_write_enable）+ 重启；pub 权限 755 不可写，`chmod 777 /var/ftp/pub`（仅实验）。
+7. 锁定本地用户三句（考试一字不差）：`local_root=/var/ftp`、`chroot_local_user=YES`、`anon_root=/var/ftp`；锁后 pwd 显示 `/`、cd / 失败（截图留证）。
+8. 登录点不能设在 777 全开放目录上（不安全且 vsftpd 拒绝）；只锁部分用户用 `chroot_list_enable` + `chroot_list_file`。
+9. 白名单：`userlist_enable=YES` + `userlist_deny=NO`，user_list 里注释系统用户只留允许者；本地用户考点 = 锁定登录点 + 黑白名单。
+10. 欢迎信息文件 `.message` 只能写在登录点，是隐藏文件，`ls -a` 查看；`idle_session_timeout` 默认 300 秒，写报告前改大防掉线。
+11. 虚拟用户七步：`useradd -s /sbin/nologin vftpuser` → `vuser.txt`（奇数行账号偶数行密码）→ `db_load -T -t hash -f` 生成 `vuser.db` → `chmod 600` → 新建 `/etc/pam.d/vsftpd.vu`（两行 pam_userdb，db= 不带后缀）→ conf 三句（`guest_enable`、`guest_username`、`pam_service_name`）→ 重启。
+12. 启用虚拟账号后本地用户全部失效；分身名（vuser1/vuser2，非 vftpuser）要写进白名单；登录点保持 755 勿改 700，`/var/ftp` 下勿自建目录。
+
+---
+
+## Linux操作系统-课堂笔记 课时8
+
+- **URL**: https://neecoo.dpdns.org/2026-10-linux-8/
+- **Published**: 2026-10-11
+- **Category**: 笔记
+- **Tags**: 学习, 笔记, linux
+
+## 一、FTP 服务概述
+
+FTP（File Transfer Protocol，文件传输协议）用于在客户端与服务器之间传输文件。它是高效的专用服务器——**唯一的工作就是保证文件传输的正确性**，登录验证、收发文件等一切事务处理都围绕这一个目标，不像 Web 服务器还要承载复杂业务。
+
+Linux 上最常用的 FTP 服务器软件是 **vsftpd**（very secure FTP daemon，"非常安全的 FTP 守护进程"），软件包与守护进程同名：
+
+```bash
+service vsftpd start    # 启动 FTP 服务
+chkconfig vsftpd on     # 设为开机自启
+```
+
+### 双连接结构（理解传输模式的前提）
+
+FTP 与多数服务不同，一次会话要用两条 TCP 连接：
+
+| 连接 | 端口 | 作用 |
+|---|---|---|
+| 控制连接 | 21 | 传命令（登录、切换目录、下载…），全程保持 |
+| 数据连接 | 主动模式 20 / 被动模式随机高位端口 | 只在真正传文件、列目录时建立，传完即断 |
+
+## 二、传输模式：主动（PORT）与被动（PASV）
+
+主动模式又称端口（PORT）模式。两种模式的差异就一句话：**数据连接由谁主动发起**。
+
+| 模式 | 数据连接发起方 | 过程 | 适用 |
+|---|---|---|---|
+| PORT 主动 | **服务器**连客户端 | 客户端把自己的 IP 和监听端口告诉服务器，服务器从 20 端口主动连过去 | 客户端可直接被访问时 |
+| PASV 被动 | **客户端**连服务器 | 客户端发 PASV 命令，服务器打开一个随机高位端口并告知，客户端主动连过去 | 客户端在防火墙/NAT 之后（最常见） |
+
+客户端处于 NAT/防火墙后时，主动模式下服务器连不进来，典型症状是"**能登录成功，但 ls 列目录卡死**"——此时应改用被动模式。高位端口指 1024 以上的临时端口。
+
+## 三、vsftpd 的配置文件
+
+都在 `/etc/vsftpd/` 目录下：
+
+| 文件 | 性质 | 作用 |
+|---|---|---|
+| `vsftpd.conf` | 主配置文件 | 每行一个"选项=值"，控制服务的一切行为 |
+| `ftpusers` | 硬黑名单 | 无论配置怎么改，列在里面的用户一律不能 FTP 登录（root 默认在内） |
+| `user_list` | 名单，黑/白可切换 | 是否启用、是黑是白由 vsftpd.conf 的两个选项决定（见下） |
+
+### user_list 的黑名单/白名单切换
+
+| 配置组合 | 效果 |
+|---|---|
+| `userlist_enable=YES` + `userlist_deny=YES`（默认） | user_list 是**黑名单**：名单内用户被拒绝登录 |
+| `userlist_enable=YES` + `userlist_deny=NO` | user_list 是**白名单**：只允许名单内用户登录，名单外全部拒绝 |
+
+启用白名单（**考试要求**）分两步——先在 vsftpd.conf 中：
+
+```bash
+userlist_enable=YES
+userlist_deny=NO
+```
+
+再编辑 `/etc/vsftpd/user_list`：把系统自带的用户行全部注释（行首加 `#`），只保留自定义用户，这样名单之外的登录请求一律拒绝。
+
+### vsftpd.conf 常用选项（本课涉及）
+
+```bash
+anonymous_enable=YES      # 允许匿名登录（默认 yes——所以未经配置的 vsftpd 就是匿名服务器）
+local_enable=YES          # 允许本地系统用户登录（考试重点，默认 no）
+write_enable=YES          # 允许写操作（上传/删除的总开关）
+anon_upload_enable=YES    # 允许匿名上传
+userlist_enable=YES       # 启用 /etc/vsftpd/user_list 名单
+userlist_deny=NO          # NO 时名单变白名单
+```
+
+## 四、匿名访问与本地用户
+
+### 匿名访问（默认形态）
+
+未经任何配置的 vsftpd 就是一台**匿名（anonymous）FTP 服务器**：任何人用 anonymous（或 ftp）这个用户名即可登录，无需真实口令。浏览器访问 `ftp://服务器IP/` 时会自动以 anonymous 登录，直接看到 FTP 根目录。
+
+匿名用户被映射到系统中的 ftp 用户，匿名登录后看到的根目录 `/` 就是 `/var/ftp/`。匿名用户的权限默认只有登录和下载，**没有上传功能**。要放开匿名上传：
+
+```bash
+# /etc/vsftpd/vsftpd.conf 中：
+anon_upload_enable=YES
+anon_mkdir_write_enable=YES   # 可选：允许匿名创建目录
+```
+
+vsftpd 不允许匿名用户直接写根目录，还要给它一个可写目录：
+
+```bash
+mkdir /var/ftp/upload
+chown ftp /var/ftp/upload     # 目录属主改为 ftp 用户
+service vsftpd restart
+```
+
+### 本地用户登录（考试重点）
+
+```bash
+# /etc/vsftpd/vsftpd.conf：
+local_enable=YES
+```
+
+开启后，系统里的真实用户即可用系统口令登录 FTP，登录后落在自己的家目录。配合白名单（`userlist_deny=NO` 且 user_list 只留自定义用户），就实现"只允许指定用户登录 FTP"。
+
+注意：root 即使加进白名单也登不进来——它默认就在 ftpusers 硬黑名单里，需先从 ftpusers 中移除。
+
+## 五、实验环境要求
+
+实验或考试前先把环境按本节准备好。
+
+### 虚拟机网络模式（VMware）
+
+| 模式 | 说明 |
+|---|---|
+| 桥接 | 虚拟机接入本机所在的**物理网段**，如同局域网里一台独立主机（拿同网段 IP，可与真实机器互访） |
+| Host-only（仅主机） | 虚拟机使用**自己的虚拟网段**，只与宿主机互通，默认不能上外网 |
+| NAT | 虚拟机经宿主机做地址转换，共享宿主机 IP 上外网 |
+
+对应的虚拟网卡：**vmnet0 是桥接网段**；除此之外 vmnet1~9 都是独立网段，其中 **vmnet1 是内网（Host-only）、vmnet8 是 NAT**。
+
+### 关闭防火墙（实验/考试必做）
+
+```bash
+service iptables stop      # 关闭 iptables 防火墙（临时，重启后恢复）
+chkconfig iptables off     # 顺带取消开机自启，避免重启后又被拦截
+getenforce                 # 查看 SELinux 状态（Enforcing=强制中）
+setenforce 0               # 临时关闭 SELinux（转为宽容模式）
+```
+
+"内核级防火墙"即 **SELinux**——工作在内核层面的强制访问控制机制，限制每个进程能访问哪些文件和端口，实验中常导致 FTP 等服务莫名异常。永久关闭：把 `/etc/selinux/config` 里的 `SELINUX=enforcing` 改为 `SELINUX=disabled`，重启生效。
+
+> ⚠️ **注意**：关闭防火墙和 SELinux 只适用于实验、考试环境；生产服务器这样做等于不设防。
+
+## 本课重点速记
+
+1. FTP 的唯一工作 = 保证文件传输的正确性，事务处理是它的全部。
+2. FTP 双连接：控制连接 21 全程保持；数据连接按模式用 20 或随机高位端口。
+3. 主/被动差异 = 数据连接谁发起：PORT 主动（服务器从 20 连客户端）、PASV 被动（客户端连服务器的随机高位端口）；客户端在 NAT/防火墙后用被动，否则"能登录不能列表"。
+4. vsftpd（very secure FTP daemon）配置目录 `/etc/vsftpd/`：`vsftpd.conf` 主配置、`ftpusers` 硬黑名单、`user_list` 黑/白可切换名单。
+5. 启用白名单（考试）：`userlist_enable=YES` + `userlist_deny=NO`，并在 user_list 里注释掉系统用户、只留自定义用户。
+6. `local_enable=YES` 允许本地用户登录（考试重点）；root 默认在 ftpusers 黑名单里登不进。
+7. 未配置的 vsftpd 就是匿名服务器：anonymous/ftp 登录、根目录 `/var/ftp/`，浏览器自动以匿名登录；匿名默认只能下载，上传需 `anon_upload_enable=YES` + 属主为 ftp 的可写目录。
+8. 实验/考试先关防火墙：`service iptables stop`，再关内核级防火墙 SELinux（`setenforce 0` 或 `SELINUX=disabled`）。
+9. 虚拟机网络：vmnet0=桥接（接物理网段）、vmnet1=Host-only 内网、vmnet8=NAT，其余 vmnet 为独立网段。
+
+---
+
+## Linux操作系统-课堂笔记 课时7
+
+- **URL**: https://neecoo.dpdns.org/2026-10-linux-7/
+- **Published**: 2026-10-11
+- **Category**: 笔记
+- **Tags**: 学习, linux, 笔记
+
+## 一、网络配置文件
+
+### /etc/sysconfig/network —— 主机级网络设置
+
+指定服务器上的全局网络信息，每行一个"字段=值"：
+
+```bash
+NETWORKING=yes                # 是否启用网络功能
+HOSTNAME=server1.example.com  # 主机名（完整域名形式）
+GATEWAY=192.168.1.1           # 默认网关
+GATEWAYDEV=eth0               # 默认网关走哪块网卡（可选）
+FORWARD_IPV4=no               # 是否开启 IPv4 转发
+```
+
+| 字段 | 含义与用法 |
+|---|---|
+| `NETWORKING` | yes/no，是否启用网络功能 |
+| `HOSTNAME` | 主机名；改后需重启生效，或用 `hostname` 命令临时改 |
+| `GATEWAY` | 默认网关——发往其他网段的数据包先交给它（一般是路由器接口的 IP） |
+| `GATEWAYDEV` | 默认网关使用的网卡设备名 |
+| `FORWARD_IPV4` | yes/no，是否允许本机在网卡间转发 IP 包；本机做路由器、NAT 共享上网时必须为 yes |
+
+### /etc/sysconfig/network-scripts/ —— 网卡配置
+
+目录下每块网卡对应一个 `ifcfg-设备名` 文件（eth0 即第一块以太网卡），系统启动时按其中的内容初始化网络：
+
+```bash
+DEVICE=eth0                # 设备名，须与文件名一致
+HWADDR=00:0C:29:AA:BB:CC   # 网卡 MAC 地址（出厂固化的物理地址，用于标识设备）
+ONBOOT=yes                 # 开机时是否激活这块网卡
+BOOTPROTO=static           # 取 IP 方式：static 手工指定 / dhcp 自动获取
+IPADDR=192.168.1.10        # IP 地址（BOOTPROTO=static 时填写）
+NETMASK=255.255.255.0      # 子网掩码——区分 IP 里"网络位"和"主机位"，255.255.255.0 即前 24 位是网络位
+GATEWAY=192.168.1.1        # 默认网关（与 network 文件里的 GATEWAY 二选一即可）
+TYPE=Ethernet              # 网络类型：以太网
+DNS1=202.96.209.5          # 首选 DNS 服务器（可选）
+```
+
+| 字段 | 含义与用法 |
+|---|---|
+| `DEVICE` | 网卡设备名，与文件名 `ifcfg-xxx` 对应 |
+| `HWADDR` | 网卡 MAC 地址 |
+| `ONBOOT` | yes/no，开机是否激活该网卡——服务器常忘改它导致开机网卡没起来 |
+| `BOOTPROTO` | static（静态 IP）/ dhcp（向 DHCP 服务器自动租用 IP） |
+| `IPADDR` / `NETMASK` | IP 地址 / 子网掩码，静态方式必填 |
+| `GATEWAY` | 默认网关 |
+| `TYPE` | 网络类型，以太网填 Ethernet |
+
+修改配置后执行 `service network restart` 生效（network 本身也是一个服务，见第六课时的 service/chkconfig 用法；也可 `ifdown eth0` 再 `ifup eth0` 单独重启一块网卡）。
+
+> ⚠️ **注意**：远程连接服务器时慎改网络配置——IP、网关写错会立即断线且无法远程恢复；重要服务器应在机房现场操作。
+
+## 二、网络配置命令
+
+### hostname —— 查看/设置主机名
+
+```bash
+hostname                   # 显示当前主机名
+hostname www.example.com   # 临时设置主机名，重启后失效
+```
+
+永久修改要写 `/etc/sysconfig/network` 的 HOSTNAME；两处最好保持一致。
+
+### ifconfig —— 查看/配置网卡
+
+```bash
+ifconfig                 # 查看当前已激活的网卡
+ifconfig eth0            # 只看指定网卡
+ifconfig eth0 192.168.1.10 netmask 255.255.255.0   # 临时设置 IP 与掩码（up 可省略）
+ifconfig eth0 down       # 停用网卡
+ifconfig eth0 up         # 启用网卡
+```
+
+输出解读（节选）：
+
+```bash
+eth0      Link encap:Ethernet  HWaddr 00:0C:29:AA:BB:CC
+          inet addr:192.168.1.10  Bcast:192.168.1.255  Mask:255.255.255.0
+          UP BROADCAST RUNNING MULTICAST  MTU:1500  Metric:1
+          RX packets:1234 errors:0 ...     # 收包统计
+          TX packets:567 errors:0 ...      # 发包统计
+```
+
+- `inet addr` 是 IP 地址，`Mask` 是子网掩码，`Bcast` 是广播地址（主机位全 1，发给全网段所有主机）；
+- `UP` 表示网卡已启用；`MTU:1500` 指单个数据包最大 1500 字节；
+- `lo` 是回环接口（127.0.0.1），永远指向本机——测试本机的网络程序不用经过真实网卡。
+
+注意：ifconfig 的修改只存在于内存，重启即失效；要永久生效写回上一节的配置文件。
+
+### route —— 查看/设置路由表
+
+数据包往哪个网段走、交给谁，由内核路由表决定；route 命令负责查看和增删路由：
+
+```bash
+route -n                 # 查看路由表（-n 直接显示数字，不做域名反解，更快）
+route add default gw 192.168.1.1     # 添加默认网关
+route del default gw 192.168.1.1     # 删除默认网关
+route add -net 10.0.0.0 netmask 255.0.0.0 gw 192.168.1.254   # 去往 10.0.0.0/8 网段走指定网关
+```
+
+输出重点看 default 行（节选）：
+
+```bash
+Destination     Gateway         Genmask         Flags  Iface
+192.168.1.0     *               255.255.255.0   U      eth0   # 本网段直连
+default         192.168.1.1     0.0.0.0         UG     eth0   # 其余流量全交给网关
+```
+
+Flags 中 U=该路由启用，G=经由网关转发。与 ifconfig 一样，route 的修改也是临时的，重启失效。
+
+## 三、网络服务应用
+
+每项网络服务背后都是一个守护进程（概念见第六课时）。软件包、守护进程与配置文件的对应关系：
+
+| 服务 | 作用 | 软件 | 守护进程/服务名 | 端口 |
+|---|---|---|---|---|
+| Web | 提供网页 | Apache | httpd | 80（HTTPS 加密版为 443） |
+| DNS | 域名解析 | bind | named | 53 |
+
+### Web 服务：Apache / httpd
+
+Apache 是最常用的 Web 服务器软件；Red Hat 中软件包与服务名都叫 httpd（Apache HTTP Server 的守护进程）：
+
+```bash
+service httpd start    # 启动 Web 服务（stop/restart/status 同理）
+chkconfig httpd on     # 设为开机自启
+```
+
+- 主配置文件 `/etc/httpd/conf/httpd.conf`；
+- 网页根目录 DocumentRoot 默认为 `/var/www/html`——把 index.html 放进去就是网站首页；
+- 默认监听 80 端口，浏览器访问 `http://服务器IP/` 即可验证。
+
+### DNS 服务：bind / named
+
+DNS（Domain Name System，域名系统）负责把好记的域名（如 www.example.com）翻译成 IP 地址。DNS 服务器软件是 bind，其守护进程叫 named：
+
+```bash
+service named start    # 启动 DNS 服务
+```
+
+- 主配置文件 `/etc/named.conf`，区域文件（记录"哪个域名对应哪个 IP"的数据库）放在 `/var/named/`；
+- 正向区域：域名 → IP；反向区域：IP → 域名；
+- 监听 53 端口。
+
+**DNS 客户端配置**——本机用谁来做解析：
+
+```bash
+# /etc/resolv.conf
+nameserver 202.96.209.5     # 指定 DNS 服务器，可写多行依次尝试
+```
+
+`/etc/hosts` 可写静态的"IP ↔ 域名"对照，默认优先于 DNS 查询，小环境临时映射用它最快：
+
+```bash
+# /etc/hosts
+192.168.1.10    www.example.com
+```
+
+## 四、网络测试与诊断命令
+
+### ping —— 测试连通性
+
+向目标发 ICMP 回显请求（Echo Request），对方回以应答（Echo Reply）即连通。ICMP（Internet 控制报文协议）是网络层用来报告状态与差错的协议，不承载业务数据。
+
+```bash
+ping 192.168.1.1            # 持续 ping，Ctrl+C 停止
+ping -c 4 www.baidu.com     # 发 4 个包后自动结束
+```
+
+输出看两点：每行的 `time=xx ms`（往返耗时，越小越快）、结尾统计里的丢包率（0% 才算稳定）。
+
+> ⚠️ **注意**：ping 不通 ≠ 服务不通——对方主机关闭 ICMP 响应（防火墙丢弃 ICMP 包）时 ping 全部超时，但它的 Web、DNS 等服务仍可能正常。
+
+### traceroute —— 跟踪路由
+
+显示数据包到达目标途中经过的每一跳路由器：
+
+```bash
+traceroute www.baidu.com
+```
+
+原理：依次发出 TTL=1、2、3… 的探测包。TTL（生存时间）每经过一个路由器减 1，减到 0 就被丢弃并回送超时消息——据此逐跳探出整条路径。Windows 下对应命令是 `tracert`。
+
+### netstat —— 查看网络连接与端口
+
+```bash
+netstat -tlnp    # 本机监听了哪些 TCP 端口、各是哪个进程（-p 需 root）
+netstat -an      # 全部连接，以数字显示
+netstat -r       # 路由表（等价 route）
+```
+
+| 选项 | 含义 |
+|---|---|
+| `-t` / `-u` | 只看 TCP / 只看 UDP（TCP 面向连接、可靠；UDP 无连接、高效） |
+| `-l` | 正在监听（LISTEN）的端口 |
+| `-n` | 直接显示 IP 和端口数字，不做域名/服务名反解 |
+| `-a` | 显示全部连接 |
+| `-p` | 显示占用端口的进程 |
+| `-r` | 显示路由表 |
+
+输出示例（节选）：`0.0.0.0:22 LISTEN sshd` 表示 sshd 在本机所有网卡的 22 端口上等待连接。常见状态：LISTEN=服务端等待连接，ESTABLISHED=连接已建立（如一个已连上的登录会话）。
+
+### nslookup —— 查询 DNS
+
+```bash
+nslookup www.baidu.com    # 查询该域名解析到哪个 IP
+```
+
+输出分两部分：`Server`/`Address` 是本次使用的 DNS 服务器，`Name`/`Address` 是解析结果。不带参数进入交互模式，`exit` 退出。更现代的同类命令是 `dig`。
+
+### arp —— 查看 IP↔MAC 映射
+
+ARP（地址解析协议）在局域网内把 IP 地址翻译成 MAC 地址：主机广播询问"谁是 192.168.1.1"，对应主机应答自己的 MAC，结果缓存进 arp 表。
+
+```bash
+arp                      # 查看当前 arp 缓存（IP ↔ MAC 对照）
+arp -d 192.168.1.1       # 删除一条缓存，下次通信重新学习
+arp -s 192.168.1.1 00:11:22:33:44:55   # 静态绑定 IP 与 MAC
+```
+
+静态绑定可防止缓存被伪造应答篡改——有人伪造 ARP 应答冒充网关窃听流量，即 ARP 欺骗，`arp -s` 绑定网关是常用的防范手段。
+
+## 本课重点速记
+
+1. 两个网络配置文件：`/etc/sysconfig/network`（主机级：NETWORKING、HOSTNAME、GATEWAY、GATEWAYDEV、FORWARD_IPV4）；`/etc/sysconfig/network-scripts/ifcfg-eth0`（网卡级：DEVICE、HWADDR、ONBOOT、BOOTPROTO、IPADDR、NETMASK、GATEWAY、TYPE）。
+2. 改配置文件后 `service network restart` 生效；配置文件永久、`ifconfig`/`route` 命令改动临时（重启失效）。
+3. `hostname` 临时改主机名；永久改 network 文件的 HOSTNAME。
+4. `ifconfig` 查看与临时设 IP；`lo`（127.0.0.1）是本机回环接口。
+5. `route -n` 看路由表，default 行即默认网关；`route add/del default gw IP` 增删网关。
+6. Web 服务：软件 Apache、守护进程 httpd；配置 `/etc/httpd/conf/httpd.conf`，网页根目录 `/var/www/html`，端口 80。
+7. DNS 服务：软件 bind、守护进程 named；配置 `/etc/named.conf` 与 `/var/named/`，端口 53；客户端解析写 `/etc/resolv.conf`，`/etc/hosts` 优先于 DNS。
+8. `ping` 用 ICMP 测连通、看丢包；对方关 ICMP 则 ping 不通但服务可能正常。
+9. `traceroute` 逐跳探路（TTL 递减原理），Windows 对应 tracert。
+10. `netstat -tlnp` 看监听端口与进程；LISTEN 等待连接、ESTABLISHED 已建立。
+11. `nslookup 域名` 查 DNS 解析结果。
+12. `arp` 管 IP↔MAC 缓存；`arp -s` 静态绑定网关可防 ARP 欺骗。
+
+---
+
+## Linux操作系统-课堂笔记 课时6
+
+- **URL**: https://neecoo.dpdns.org/2026-10-linux-6/
+- **Published**: 2026-10-11
+- **Category**: 笔记
+- **Tags**: 学习, 笔记, linux
+
+## 一、进程与 Init 进程
+
+### 从程序到进程
+
+应用软件运行起来就成为**进程**。每个进程由操作系统分配一个唯一的 **PID**（进程号）。进程也可能被**中断**而结束——中断指进程收到操作系统发出的**信号**（signal）后停止当前工作；按 Ctrl+C、执行 `kill` 命令，本质上都是给进程发信号。
+
+### Init 进程
+
+Init 是由**内核**启动的第一个**用户态**进程。内核（kernel）是操作系统最核心、直接管理硬件的部分；用户态进程指运行在内核之外的普通程序，不是内核自身的组成部分：
+
+- **PID 永远为 1**，是其他所有进程的父进程（祖先）；
+- 程序位于 `/sbin/init`；如果该文件不存在，内核会依次尝试 `/etc/init`、`/bin/init`、`/bin/sh`，全部失败则系统启动失败；
+- Init 的行为由配置文件 **`/etc/inittab`** 描述：定义默认运行级别，以及各运行级别下要执行的动作。
+
+系统启动时，内核完成自身的初始化后就把控制权交给 init，init 再按 inittab 的定义把系统"带"到指定的运行级别，后续的服务启动都由它驱动。
+
+### 配置文件 /etc/inittab
+
+文件中每行一条指令，格式为四个冒号分隔的字段：
+
+```
+id:runlevels:action:process
+```
+
+| 字段 | 说明 |
+|---|---|
+| id | 1~4 个字符的唯一标识，仅用于区分条目（如 `id`、`l5`、`ca`） |
+| runlevels | 该条目对哪些运行级别生效，如 `345`；留空表示所有级别 |
+| action | 告诉 init 如何对待 process（见下表） |
+| process | 要执行的命令 |
+
+常用 action：
+
+| action | 含义 |
+|---|---|
+| `initdefault` | 定义默认运行级别（无 process 字段） |
+| `sysinit` | 开机时最先执行一次（进入任何级别之前），一般指向系统初始化脚本 |
+| `wait` | 进入指定级别时执行一次，并等它结束再继续 |
+| `respawn` | 进程一旦退出就立刻重新拉起，让它常驻不退 |
+| `ctrlaltdel` | 按下 Ctrl+Alt+Del 时执行的动作 |
+| `powerfail` / `powerokwait` | 接 UPS（不间断电源）通知：断电时执行关机 / 供电恢复时取消关机 |
+
+一份典型的 inittab（RHEL 风格，节选）：
+
+```bash
+id:5:initdefault:                       # 默认进入运行级别 5
+si::sysinit:/etc/rc.d/rc.sysinit        # 开机最先执行的系统初始化脚本
+l0:0:wait:/etc/rc.d/rc 0                # 进入级别 N 时执行 rcN.d 下的启动/停止脚本
+l1:1:wait:/etc/rc.d/rc 1                # （l2、l4 同理）
+l3:3:wait:/etc/rc.d/rc 3
+l5:5:wait:/etc/rc.d/rc 5
+l6:6:wait:/etc/rc.d/rc 6
+ca::ctrlaltdel:/sbin/shutdown -t3 -r now    # Ctrl+Alt+Del 重启
+pf::powerfail:/sbin/shutdown -f -h +2 "Power Failure; System Shutting Down"
+1:2345:respawn:/sbin/mingetty tty1      # 1~6 号虚拟终端，退出登录后自动重新拉起
+x:5:respawn:/etc/X11/prefdm -nodaemon   # 级别 5 由它拉起图形登录界面
+```
+
+末尾的 `mingetty` 行对应 tty1\~tty6 共 6 个**虚拟终端**——Linux 提供的 6 个文字登录台，图形界面下可按 Ctrl+Alt+F1\~F6 切换；`respawn` 保证有人注销后，登录提示会重新出现。
+
+chkconfig 管理的 `/etc/rc.d/rcN.d` 脚本，正是被 `lN:N:wait:/etc/rc.d/rc N` 这几行驱动的。
+
+> ⚠️ **注意**：`initdefault` 千万不能设为 0 或 6——否则一开机就关机/重启，系统永远起不来；补救要在开机**引导**阶段（按下电源、系统尚未进入登录的那段启动过程）进入单用户模式把它改回。
+
+### 进程树与 pstree
+
+```bash
+pstree      # 树状显示当前系统进程
+```
+
+pstree 以树形结构展示进程间的父子关系，树根就是 init（PID 1），可见所有进程都源自它。常用 `-p` 选项在每个进程名后附上 PID。
+
+## 二、运行级别
+
+Linux（SysV 风格）把系统的运行状态划分为 7 个运行级别。SysV 即 UNIX System V 风格的传统 init 体系（较新的发行版已改用 systemd，本课按 SysV 讲）：
+
+| 级别 | 含义 |
+|---|---|
+| 0 | 关机（halt） |
+| 1 | 单用户模式——只用于维护或管理，相当于 Windows 的安全模式 |
+| 2 | 多用户模式，不带 NFS（网络文件系统，机器之间共享目录用的服务） |
+| 3 | 完全多用户模式（纯文本界面） |
+| 4 | 用户自定义级别（系统保留，一般不用） |
+| 5 | X11（X Window 图形界面系统），多用户图形模式（日常桌面模式） |
+| 6 | 重新启动（reboot） |
+
+> ⚠️ **注意**：`init 0` 与 `init 6` 会**立即关机/重启**系统，多用户环境下会切断所有在线用户的会话，执行前确认大家的工作都已保存。
+
+相关命令：
+
+```bash
+runlevel    # 查看当前运行级别，输出"前一级别 当前级别"，如 "N 5"（N 表示开机后尚未切换过级别）
+init 3      # 切换到运行级别 3（等价于 telinit 3）
+```
+
+服务器日常运行在级别 3（无桌面）或 5（带桌面）。
+
+## 三、守护进程（Daemon）
+
+### 概念与特点
+
+- **每一项不同的服务都对应一个不同的守护进程**（如 WWW 服务对应 httpd、SSH 服务对应 sshd）；
+- 是**脱离终端、在后台运行**的进程——终端就是你登录后的命令行会话，脱离终端即用户注销它也不会跟着退出；
+- **生命周期长**：通常随系统启动而启动、随系统关闭而终止，全程驻留内存等待服务请求。
+
+守护进程名一般以 `d` 结尾（httpd、sshd、crond、xinetd）。
+
+### 运行方式
+
+#### 独立运行（standalone）
+
+- 代表**重量级服务**：使用和访问人数多、需要快速响应的服务才独立运行（如 httpd、sshd）；
+- 其守护进程脚本存放于 **`/etc/rc.d/init.d`**；
+- 独立运行的服务常驻内存、监听端口（端口是网络服务的编号，监听即守在端口处等请求进来），响应快，但常驻也就占资源。
+
+#### 由 xinetd 托管
+
+**xinetd 本身就是一个守护进程**，称为"超级守护进程"：它常驻内存代为监听端口，而**基于 xinetd 的服务都是轻量级访问服务**，平时并不运行，只有请求到来时才由 xinetd 唤醒对应的服务进程——适合访问不频繁的小服务，节省资源。
+
+xinetd 的优点：
+
+| 优点 | 说明 |
+|---|---|
+| 访问控制功能强大 | 可按来源 IP、时间等条件允许或拒绝连接 |
+| 有效防止 DDoS | DDoS（分布式拒绝服务攻击）用海量请求淹没服务；xinetd 可限制并发连接数、每秒连接速率 |
+| 强大的日志功能 | 连接成功/失败都能详细记录 |
+| 支持重定向 | 可把连接转发到其他主机或端口 |
+
+#### xinetd 的启动与配置
+
+```bash
+service xinetd start    # 启动 xinetd（stop/restart/status 同理）
+```
+
+主配置文件 `/etc/xinetd.conf` 定义全局默认值，末尾把各服务的独立配置纳入进来：
+
+```bash
+defaults
+{
+    instances       = 60                # 每个服务最多 60 个并发连接
+    log_type        = SYSLOG authpriv   # 日志交给 syslog（系统统一日志服务）的 authpriv（认证类）类别
+    log_on_success  = HOST PID          # 成功连接记录来源主机与进程号
+    log_on_failure  = HOST              # 失败连接记录来源主机
+    cps             = 25 30             # 每秒超 25 个连接就暂停 30 秒
+}
+
+includedir /etc/xinetd.d               # 各轻量级服务在此目录下各占一个文件
+```
+
+常见配置项：
+
+| 配置项 | 作用 |
+|---|---|
+| `instances` | 同一服务允许的最大并发连接数（同时最多接多少个） |
+| `log_type` | 日志记录方式（写 syslog 或写到指定文件） |
+| `log_on_success` | 连接成功时记录哪些信息（PID、HOST 等） |
+| `log_on_failure` | 连接失败时记录哪些信息 |
+| `cps` | 每秒连接数限制，超限则暂停服务一段时间（见上例 `cps 25 30`）——防 DDoS 靠它和 `instances` |
+| `includedir /etc/xinetd.d` | 各服务的独立配置文件所在目录，一个服务一个文件（见下方示例） |
+
+`/etc/xinetd.d/` 下每个文件配置一个服务（以 telnet 为例，节选）：
+
+```bash
+service telnet
+{
+    socket_type     = stream        # 流式（TCP）；UDP 服务写 dgram
+    wait            = no            # no=每个连接起一个进程、可并发；yes=一次只服务一个连接
+    user            = root          # 服务进程以哪个用户身份运行
+    server          = /usr/sbin/in.telnetd
+    log_on_failure  += USERID       # += 在全局默认基础上追加记录失败时的用户名
+    disable         = yes           # 该服务停用；改成 no 即启用——最常用的开关
+}
+```
+
+属性赋值支持三种运算符：`=` 赋值、`+=` 在默认值上追加、`-=` 移除。修改配置后执行 `service xinetd restart` 生效。
+
+## 四、服务管理工具
+
+设置服务"开机是否自启动"有三类工具：
+
+| 工具 | 界面 | 说明 |
+|---|---|---|
+| `redhat-config-services` | 图形（X Window） | 图形化服务配置工具（后更名为 system-config-services），鼠标勾选服务的自启动 |
+| `ntsysv` | 文本 | 终端内的伪图形界面（用 ncurses 字符图形库画出的菜单），方向键移动、空格勾选；默认只作用于**当前运行级别**，`ntsysv --level 35` 可指定级别 |
+| `chkconfig` | 命令行 | 查询和设置服务的自启动状态，适合脚本批量操作 |
+
+### chkconfig
+
+`chkconfig` 用来**激活和解除服务的自启动**，实际上是在增删 `/etc/rc.d/rcN.d/` 目录下指向 `/etc/rc.d/init.d/` 服务脚本的符号链接（符号链接类似 Windows 的快捷方式；S 开头表示启动、K 开头表示停止）。
+
+常用命令：
+
+```bash
+chkconfig --list                # 列出所有服务在各运行级别的自启动状态
+chkconfig --list nfs            # 查看单个服务
+chkconfig --level 345 nfs off   # 在 3/4/5 运行级别解除 nfs 自启动
+chkconfig --level 35 nfs on     # 在 3/5 运行级别激活 nfs 自启动
+chkconfig --add nfs             # 把新服务纳入 chkconfig 管理
+chkconfig --del nfs             # 把服务移出 chkconfig 管理
+```
+
+`--level` 省略时，`on`/`off` 默认作用于 2、3、4、5 四个级别。
+
+> ⚠️ **注意**：`chkconfig` 只改变"开机是否自启动"，**不会**立即启动或停止当前正在运行的服务；要立即生效需配合 `service 服务 start/stop`。
+
+### chkconfig 与 service 的区别
+
+| 对比项 | `service` | `chkconfig` |
+|---|---|---|
+| 性质 | 一次性命令 | 永久性命令 |
+| 操作 | `start` / `stop` / `restart` / `status` | `on` / `off` |
+| 作用 | 立即启动/停止服务，重启系统后失效 | 设置开机是否自启动，不影响当前运行状态 |
+
+两者常配合使用：`chkconfig 服务 on` 让它开机自启，`service 服务 start` 让它现在就跑起来。
+
+## 五、拓展：万维网与因特网的关系
+
+**因特网（Internet）**是把全球无数计算机网络互联起来的网络本身，是硬件与通信的基础设施；**万维网（WWW，World Wide Web）**只是因特网提供的众多服务之一——基于 HTTP（超文本传输协议）、以超文本方式组织信息、通过浏览器访问。
+
+所以"上因特网"不等于"上网页"：收发邮件、文件传输（FTP）、域名解析（DNS，把网址翻译成 IP 地址）等同样是因特网服务。两者常被混称，但万维网 ≠ 因特网。
+
+## 本课重点速记
+
+1. Init 是内核启动的第一个用户态进程，PID 恒为 1，是所有进程的祖先；位于 `/sbin/init`（不存在则依次尝试 `/etc/init`、`/bin/init`、`/bin/sh`，全失败则启动失败）。
+2. `/etc/inittab` 每行四字段 `id:runlevels:action:process`；常用 action：`initdefault` 默认级别、`sysinit` 开机初始化、`wait` 进级别执行一次、`respawn` 退出即拉起、`ctrlaltdel`、`powerfail`。
+3. 各级别脚本由 `lN:N:wait:/etc/rc.d/rc N` 驱动；`initdefault` 设为 0/6 会导致开机即关机/重启，补救要在引导阶段进单用户模式改回。
+4. `pstree` 树状显示进程，树根是 init；`-p` 附带 PID。
+5. 运行级别：0 关机、1 单用户（≈Win 安全模式）、2 多用户无 NFS、3 完全多用户（纯文本）、4 保留自定义、5 图形 X11、6 重启。
+6. `runlevel` 查看当前级别（输出"前一级别 当前级别"），`init N` 切换级别；`init 0` 关机、`init 6` 重启。
+7. 守护进程（Daemon）：脱离终端、后台运行、生命周期长；每项服务对应一个守护进程，名字多以 `d` 结尾。
+8. 独立运行 = 重量级服务（脚本在 `/etc/rc.d/init.d`）；xinetd = 超级守护进程，托管轻量级服务、按需唤醒，优点是访问控制、防 DDoS、日志、重定向。
+9. xinetd 主配置 `/etc/xinetd.conf`（defaults 全局默认 + `includedir /etc/xinetd.d`），每个服务一个文件；常用属性 `instances`/`cps`/`log_type`/`log_on_success`/`log_on_failure`；运算符 `=`、`+=`、`-=`；改完 `service xinetd restart`。
+10. 自启动管理三工具：`redhat-config-services`（图形）、`ntsysv`（文本，默认当前级别）、`chkconfig`（命令行）。
+11. `chkconfig --list` 查看，`--level 级别 服务 on/off` 设置（省略 `--level` 时作用于 2/3/4/5），`--add/--del` 纳入/移出管理。
+12. `service` 一次性（start/stop，立即生效）；`chkconfig` 永久性（on/off，开机自启），两者互补。
+13. 万维网（WWW/HTTP）只是因特网提供的众多服务之一，因特网 ≠ 万维网。
+
+---
+
+## APK 脱壳教程（以慧生活798为例，AntSafe 动静态脱壳实战）
+
+- **URL**: https://neecoo.dpdns.org/2026-10-apk-798-antsafe/
+- **Published**: 2026-10-10
+- **Category**: 教程
+- **Tags**: 经验, 安卓, 逆向, By AI, 学习, 脱壳, antsafe
+- **Description**: 样本：慧生活798\.apk（v3\.1\.8，versionCode 31008，包名 com\.cloudora\.android）
+ 壳：蚂蚁加固 AntSafe（stub 版本 7\.6\.4\_1025）
+ 用途声明：本教程及全部产物仅用于安全学习与研究。
+
+```
+ 样本：慧生活798\.apk（v3\.1\.8，versionCode 31008，包名 com\.cloudora\.android）
+ 壳：蚂蚁加固 AntSafe（stub 版本 7\.6\.4\_1025）
+ 用途声明：本教程及全部产物仅用于安全学习与研究。
+```
+
+## 一、结论摘要
+
+- 壳文件 classes\.dex 实为「stub 壳 \+ 9 个真实 DEX 首尾相接」的复合文件，总大小 69253164 字节；stub 只占开头 61096 字节。
+
+- 壳只加密了每个 DEX 的 **112 字节 header \+ string\_ids 偏移表**，字符串数据池与其余结构（type/proto/field/method/class\_defs/code\_items）全部完好，因此可以纯静态恢复。
+
+- 已成功脱出 9 个真实 DEX \+ stub 自身，其中 8 个 DEX 通过 androguard 结构校验并成功 jadx 反编译，恢复约 **6\.5 万个类、38682 个 Java 源文件**；业务源码（com\.cloudora\.android，如 MainActivity\.java）完整可读。
+
+- 两个 DEX 存在组件级加密、纯静态不可恢复，需走动态脱壳（见第六节）：classes5 的 class\_data（方法体归属）被抽走加密存于 assets/antisc\.db；classes9 的 id 表整体加密（内容仅网易易盾反劫持 SDK，价值低）。
+
+## 二、壳识别
+
+拿到 APK 先做三件事，五分钟内就能确认壳类型：
+
+1. 解包：`unzip 慧生活798.apk -d extracted/`
+
+2. 看 Application：AndroidManifest\.xml 里 `android:name` 指向的 Application 类即壳入口。本样本为 `com.antsafe.sec.wrapper.MyApplication`——**antsafe** 即蚂蚁加固（AntSafe）的特征命名。
+
+3. 看 native 库与 assets：
+
+```
+lib/arm64-v8a/
+  libantsc.so      1122888 字节   ← 加固核心库
+  libantsc-x86.so  1072816 字节
+  libdexfix.so      141936 字节   ← 名字直说了：运行时修 DEX
+  libneguard.so
+  libnesec.so
+assets/
+  antisc.db        855566 字节    ← 加密存储的组件（部分 class_data）
+  .nesec_patch
+```
+
+反编译 stub 后还能看到它的反调试/反模拟器逻辑（字符串混淆前是「Emulator detected」「Cloud phone detected」「Debugger detected」「Auto\-tap detected」等），以及 assets 里的 antisc\.db 与网易易盾（NetEase）组件的关系——stub 里的字符串用 **Base64 解码后再 XOR 密钥 "Netease"** 混淆；MyJni 从 assets 释放 "antsc"/"antsc\-x86" 资产时对**首 4 字节 XOR 55** 还原 ELF 头（`\x7fELF`），这就是文件里搜不到 ELF 魔数的原因。
+
+## 三、加固结构剖析（本壳的核心设计）
+
+1. **真实 DEX 不在 assets、不加密整段，而是直接内嵌在 classes\.dex 文件里**：stub dex 之后 9 个 DEX 首尾相接。这是本壳最狡猾的地方——你以为该去 assets 找加密 payload，其实它们就躺在你解出来的第一个 dex 文件里。
+
+2. **stub 的 header 造假**：stub 的 header `file_size` 字段写的是整个文件大小（69253164），让 ART 按「一个大 dex」加载它；实际有效内容只有前 61096 字节。
+
+3. **magic 替换反内存搜索**：全部隐藏 DEX 的 magic 被替换为 `fcd169dfca245d54`，`grep "dex\n"` 一个都搜不到。
+
+4. **加密范围最小化**：每个 DEX 只加密 112 字节 header \+ string\_ids 偏移表。string\_ids 表是「按序指向字符串池」的 u32 数组，DEX 规范要求字符串按 UTF\-16 码元升序排列——**字符串池本身没加密，排序规则又是公开的，所以这张表可以完整重建**。这是静态脱壳的突破口。
+
+5. **按 DEX 粒度的组件级保护**：dex5 整个 class\_data 区段被抽走（加密存于 assets/antisc\.db，运行时由 libantsc\.so/libdexfix\.so 解密回填）；dex9 的 type/field/method/proto id 表整体加密。抽走的组件纯静态恢复不了——这是壳对「纯静态方案」的封堵，也是本教程必须交代的局限。
+
+## 四、静态脱壳四步法
+
+### 第 1 步：扫 map\_list 定位每个 DEX
+
+DEX 文件尾部有 map\_list（类型→偏移的结构索引）。特征：以一个 header 条目开头（type=0x0000、size=1、offset=0）。扫描特征字节 `struct.pack('<III', 0, 1, 0)`，命中处**往前 4 字节是条目计数 count（u32）**——map\_list 自身的 count 字段，很多人在这里搞错（误把首条目当 count）。本样本从 61096（stub 结束处）起扫，命中 9 处，即 9 个隐藏 DEX。
+
+### 第 2 步：确定每个 DEX 的边界
+
+- `map_off` 取 map\_list 中 0x1000（map\_list 类型）条目的 offset，`base = count字段位置 - map_off` 即该 DEX 在文件中的起点。
+
+- DEX 大小 = `map_off + 4 + count × 12`（count 条目，每条 12 字节）。
+
+### 第 3 步：重建 string\_ids
+
+- 字符串池区间：map 条目 0x2002（string\_data\_item）的 offset 到下一个区段（通常 0x2004，没有则到 map\_off）。
+
+- 逐条解析：ULEB128 长度 \+ MUTF\-8 数据 \+ NUL 结尾，并按 DEX 规范解码成 UTF\-16 码元列表校验长度。
+
+- **按 UTF\-16 码元序排序**，然后按排序结果把每个字符串的「池内偏移」写回 string\_ids 表（u32 数组，位置由 map 条目 0x0001 给出）。
+
+### 第 4 步：重建 112 字节 header
+
+按 DEX 规范回填：magic `dex\n035\0`、`header_size=112`、`endian_tag=0x12345678`、map\_off、六张表的 size/off（从 map\_list 直接取）、file\_size/data\_size/data\_off；再重算 `sha1(dex[32:])` 写入 \[12:32\]、`adler32(dex[12:])` 写入 \[8:12\]。
+
+### 本样本 9 个 DEX 的定位参数（可直接对照复现）
+
+|DEX|文件内偏移|大小\(字节\)|字符串数|类数|
+|---|---|---|---|---|
+|dex1|0xf0a4|9019320|65584|10053|
+|dex2|0x8a905c|8307332|49647|9297|
+|dex3|0x10952e0|8773472|47888|8988|
+|dex4|0x18f3240|8842564|67978|8333|
+|dex5|0x2161f84|8334972|54394|10305|
+|dex6|0x29da244|9436584|62597|11613|
+|dex7|0x32d9fec|8446232|52460|9213|
+|dex8|0x3ae8104|7434316|55780|7942|
+|dex9|0x41ff150|50908|681|48|
+
+### 完整脱壳脚本
+
+交付包里的 `unpack_antsafe.py` 可直接复用（对同类 AntSafe 壳通用），核心逻辑：
+
+```python
+import struct, hashlib, zlib
+
+def find_maps(data, start):
+    # 扫描 map_list 特征：header 条目 (type=0,size=1,offset=0)
+    results = []
+    needle = struct.pack('<III', 0, 1, 0)
+    pos = start
+    while True:
+        idx = data.find(needle, pos)
+        if idx < 0: break
+        map_pos = idx - 4            # count 字段在首条目前 4 字节
+        count = struct.unpack_from('<I', data, map_pos)[0]
+        entries = {}
+        for i in range(count):
+            t, sz, off = struct.unpack_from('<HHI', data, map_pos + 4 + i*12)
+            entries[t] = (sz, off)
+        results.append((map_pos, entries))
+        pos = idx + 12
+    return results
+
+def parse_string_pool(data, start, end, expected):
+    # ULEB128 长度 + MUTF-8 + NUL；解码为 UTF-16 码元并校验长度
+    pool = []
+    q = start
+    while q < end and len(pool) < expected:
+        v, shift, p = 0, 0, q
+        while True:
+            b = data[p]; p += 1
+            v |= (b & 0x7f) << shift
+            if not (b & 0x80): break
+            shift += 7
+        s = data[p:p+v]                 # 原始 MUTF-8 字节
+        u16 = mutf8_to_utf16(s)         # 按 DEX 规范解码
+        assert len(u16) == v            # 长度校验（壳没加密池子，校验必过）
+        pool.append((p, u16))            # (字符串起始偏移, 码元序列)
+        q = p + v + 1                   # 跳过 NUL
+    return pool
+
+def rebuild_dex(data, map_pos, entries):
+    map_count = struct.unpack_from('<I', data, map_pos)[0]
+    map_off = entries[0x1000][1]
+    base = map_pos - map_off
+    dex_size = map_off + 4 + map_count * 12
+    dex = bytearray(data[base:base+dex_size])
+    # 1) 解析字符串池并按 UTF-16 码元升序排序 → 重建 string_ids
+    pool = parse_string_pool(dex, entries[0x2002][1],
+                             entries.get(0x2004, (0, map_off))[1] or map_off,
+                             entries[0x0001][0])
+    pool.sort(key=lambda x: x[1])
+    sids_off = entries[0x0001][1]
+    for i, (abs_off, _) in enumerate(pool):
+        struct.pack_into('<I', dex, sids_off + i*4, abs_off)
+    # 2) 重建 112 字节 header（file_size、map_off、六表 size/off、magic…）
+    build_header(dex, entries, map_off, map_count)
+    # 3) 重算签名：sha1 + adler32
+    dex[12:32] = hashlib.sha1(dex[32:]).digest()
+    struct.pack_into('<I', dex, 8, zlib.adler32(bytes(dex[12:])))
+    return bytes(dex)
+```
+
+## 五、验证与反编译
+
+1. **结构校验**：用 androguard（`pip install androguard`）逐个加载脱壳后的 DEX，能完整解析类/方法即通过。本样本 dex1/2/3/4/6/7/8 \+ stub 共 8 个全部通过。
+
+2. **反编译**：`jadx -d out/ classesN_unpacked.dex --no-res`。业务代码在 dex4（64 个 com\.cloudora\.android 业务类，MainActivity\.java 反编译质量完整：kotlin 类、imports、方法体均正确）。
+
+3. **内容速览**（脱壳后各 DEX 的成分）：
+
+|DEX|主要内容|
+|---|---|
+|dex1\-3|AndroidX/系统支撑库|
+|dex4|业务主体：com\.cloudora\.android（扫地机 App 主逻辑）\+ ilife SDK|
+|dex5|ilife 业务 2757 类 \+ 快手广告 kwad 5400\+ 类 \+ 京东广告 1252 类 \+ 个推|
+|dex6\-8|各类三方 SDK|
+|dex9|网易易盾反劫持 SDK（48 类，id 表加密）|
+|stub|壳自身 30 个类（MyApplication/MyJni/字符串解码器等）|
+
+## 六、局限与动态脱壳路线
+
+纯静态方案恢复不了壳抽走的那部分。
+
+- **classes5 的 class\_data 被整体抽走**：该区段（10192 项）的 offset 恰好等于文件末尾——文件里已经没有这块数据，加密存于 assets/antisc\.db（855566 字节），运行时由 libantsc\.so/libdexfix\.so 解密回填。已用 annotations\_directory 精确解析证明文件内无隐藏空间，**静态穷尽**。后果：dex5 的 10305 个类名可恢复（见交付包 `classes5_类清单.txt`），但方法体归属拿不到。
+
+- **classes9 的 id 表整体加密**：type/field/method/proto id 表是加密垃圾值，静态不可恢复。内容仅网易易盾 SDK，价值低。
+
+要拿全 dex5，需动态脱壳，路线：
+
+1. **Frida dump**：样本有反调试/反模拟器检测，需先过检测（Frida 改名/隐藏、或用整改过的 ROM）。在 libdexfix\.so 回填 class\_data 之后、`DefineClass`/`OpenMemory` 调用点处 hook，直接 dump 解密后的内存 DEX——组件被解密回填后内存里就是完整 DEX，一次全拿。
+
+2. **定位要点**：壳的 classTable/setClassTable 类解析挂钩、libantsc\.so 的解密函数是断点首选；antisc\.db 的解密结果落点即 class\_data 区段。
+
+3. 通用工具备选：FRIDA\-DEXDump / frida\-unpack、BlackDex（ART 环境下直接从内存抽 DEX）。
+
+## 七、学习要点：这只壳教了我们什么
+
+- **别默认去 assets 找加密 payload**——有的壳把真实 DEX 直接藏在第一个 classes\.dex 文件内部，靠 header file\_size 造假让加载器「看不见」后半段。
+
+- **magic 替换是最常见也最没用的对抗**——结构解析靠 map\_list 而不是 magic，替换 magic 只能防 `grep`。
+
+- **加密范围最小化是把双刃剑**：只加密 header\+string\_ids 已经能废掉绝大多数解析器，但只要字符串池没加密、排序规范是公开的，表就能重建。壳的加密强度应该按「被抽走的组件」评估，而不是按「加密了哪些字节」评估。
+
+- **组件级抽取才是真正的分水岭**：antisc\.db 把 class\_data 抽走后，静态分析只能拿到「类名清单」，拿不到逻辑。对付这类设计只有动态脱壳一条路。
+
+- **反调试/字符串混淆（Base64\+XOR）/资产藏匿（XOR 55 还原 ELF 头）** 只增加分析成本，不改变可逆性；写脱壳脚本时先反编译 stub、解开它的字符串混淆，能省一半定位时间。
+
+## 九、动态脱壳实战
+
+上一章末尾我们说：静态方案拿不到壳按需解密的运行期内容，真正的完整脱壳要靠动态。本章就是实战记录：在一台有 root 权限的安卓模拟器上，把慧生活798（AntSafe 7\.6\.4 壳、包名 `com.cloudora.android`）的 9 个 dex 全部完整地抓了出来。
+
+### 9\.1 路线一：Frida 注入——失败
+
+按惯例先试 Frida（`frida-server` push 到 `/data/local/tmp`，root 启动后 attach）。结果是应用启动即崩溃，反复重启进入崩溃循环。关键观察：
+
+- 不注入任何东西时，应用在同一台 root 模拟器上**正常运行**；
+
+- 只要 Frida 在场（哪怕只是 attach、没下任何 hook），应用立刻自杀。
+
+结论：这只壳的运行时自检是**反 Frida，而不是反 root**。内存里能扫到 frida\-agent 特征（线程名 `/proc/self/maps` 中的 frida 字样、gum 库符号等）。这条路线对这种壳是死路，别死磕。
+
+### 9\.2 路线二：设备端旁路 `/proc/pid/mem`——成功
+
+既然不能注入，那就**根本不进进程**：root 权限下直接读写 `/proc/<pid>/mem`，从进程外部把内存抄出来，壳的运行时自检完全无感（没有 map 改动、没有线程注入、没有 so 加载）。具体做法：
+
+1. 用 `NDK` 编译一个设备端小工具（`memscan`），push 到 `/data/local/tmp`，`chmod +x` 后以 root 跑；
+
+2. 解析 `/proc/<pid>/maps`，把所有可读的 rw 匿名区域列成清单喂给它；
+
+3. 它以 root 身份 `open("/proc/pid/mem")` \+ `pread` 按区域分块读出，落盘到 `/data/local/tmp/dumpx/`。
+
+第一步踩的坑：区域清单文件它要的是 `%llx %llx`（十六进制 start \+ 十六进制 size）格式，而且设备的 awk 没有 `strtonum`，十进制喂进去它一个区域都不认——返回 0 区域。改用 shell 算术 `$((0x...))` 生成十六进制清单后正常。
+
+### 9\.3 关键发现一：魔数扫描会错过"解密窗口"
+
+教科书式做法是扫内存里的 `dex\n035` 魔数。实测发现这只壳抓不到：壳启动时把复合体按 dex 切片映射到独立 rw 匿名区域，**映射出来的内容不是标准 dex 开头**——这引出第二个发现（见 9\.4）。单纯扫魔数会把全部 9 个 dex 都漏掉。
+
+两个补救手段，都要用：
+
+- **稳态全扫**：应用跑起来、界面加载完成之后，所有该解密的都解密完了，此时全内存扫描一次，按区域特征（大小、结构）而不是魔数来认 dex；
+
+- **差量截获**：同一组区域在两个时间点各 dump 一份，diff 之后新解开的字节就是增量。
+
+### 9\.4 关键发现二："\+4 偏移"映射与 header 原地重写
+
+比对稳态 dump 和早期帧，弄清了这只壳的两个核心行为，这是本壳最值得学的部分：
+
+- **\+4 切片映射**：每个真实 dex 被映射到独立区域时，内容是**从原 dex 文件偏移 \+4 开始**的（即跳过了 `dex\n` 四字节魔数），区域前一页的尾部挂着这 4 个前缀字节。重建方法：`dex\n` \+ 区域内容截取到 fsize（fsize 从区域帧头读出）。最小的 dex9（48 个类）就是用这个方法 100% 重建的，重建后 checksum 自洽。
+
+- **header 原地重写**：解密**完成后**，壳会把每个区域的 header 原地重写成标准 dex 头。所以早期帧里看到的"密文 header"并不是加密残留，只是解密中途的快照——用早期帧和稳态帧逐字节比对（300/300 偏移一致）可以实锤这一点。
+
+**校验和的坑**：壳在校验和还在"零填充态"时就提前算好了 adler32，后续按需解密写入会打破这个陈旧校验和。所以稳态 dump 出来的 dex `checksum` 字段是 BAD——**这不代表内容缺失**，只是校验和过时。交付前用 `zlib.adler32` 重算修补即可（`d[8:12] = adler32(d[12:fsize])`），修补后 jadx 正常加载。
+
+**超集合并**：同一 dex 的早期帧和稳态帧做逐字节方向统计——差异全部是"旧零新有、零冲突"时，稳态版本就是早期版本的严格超集，直接取稳态版作为最终产物。7 对新旧 dex 全部满足"零冲突"才敢这么做；有任何一例冲突就必须逐块甄别。
+
+### 9\.5 完整性验证：别把"看起来有洞"当成"没拿全"
+
+拿到 9 个 dex 后做了三层验证，结论是**内容 100% 完整**：
+
+- **class\_data 全活**：逐 dex 解码 class\_data，全部 83,792 个类的类数据都在（100% live，零可疑项）；
+
+- **全零字节码 ≠ 加密缺口**：各 dex 有 0\.4%\~2\.5% 的方法字节码区全零，且**跨进程稳定复现**——这是 R8 编译器剥离实现的空桩方法（保留声明、剥掉代码），不是壳没解完。把它们当缺失就误判了；
+
+- **map\_list 空洞无引用**：dex4 有 132 个全零块，位于 ANNOTATION 与 ENCODED\_ARRAY 之间的区域，`map_list` 里没有任何 section 指向它——属于壳切片时的抽尾残留，反编译器直接忽略，不影响内容。
+
+### 9\.6 反编译与成果
+
+- jadx（1\.5\.6）会拒绝加载 checksum BAD 的 dex——先修补校验和再喂；
+
+- 小内存机器（2核4G）上 9 个 dex 一起合并跑会 GC 抖动到死锁，**逐 dex 串行**（每 dex 25\~60 秒）才是可行解；
+
+- 成果：**9 个 dex / 83,792 个类 / 41,584 个 \.java 文件**，全部反编译成功。
+
+### 9\.8 动态路线学习要点
+
+1. 先判断壳的检测面：这只壳反 Frida 不反 root，那"不注入 \+ root 旁路"就是天然克制它的路线；
+
+2. `/proc/pid/mem` 旁路是零注入方案的上限：不改内存、不起线程，壳的运行时自检无从察觉；
+
+3. 魔数扫描不是万能的：切片映射会剥离魔数，要学会按**区域大小与结构特征**认 dex，并善用时间差量；
+
+4. dump 出来的 dex 校验和 BAD 是常态（壳提前算校验和 \+ 按需解密），重算修补即可，别当成内容损坏；
+
+5. 多时间点 dump 之间的**超集判定**（零冲突才合并）是从"碎片"拼出"完整"的正确姿势；
+
+6. 完整性结论要有证据：class\_data 全活 \+ 全零项跨进程稳定（R8 桩）\+ 空洞无 map 引用，三条证据链齐了才能下"100% 完整"的结论。
+
+---
+
+## 一次完整的加固 App 逆向：从内存修复 dex 到自造加密请求
+
+- **URL**: https://neecoo.dpdns.org/2026-09-app-dex/
+- **Published**: 2026-09-25
+- **Category**: 教程
+- **Tags**: 经验, By AI, 逆向, 博客, 安卓
+
+# 一次完整的加固 App 逆向：从内存修复 dex 到自造加密请求
+
+> 目标 App：某高校第二课堂平台（网易易盾加固，v4.9.1）。目标：完全脱离 App，用脚本自造它的加密请求（登录、搜索、报名全流程）。
+> 环境：MuMu 模拟器（Android 12 x86_64，root）+ mitmproxy + jadx + capstone + Python。
+
+## 0. 战役总览
+
+| 阶段 | 手段 | 结果 |
+|---|---|---|
+| 侦察 | jadx / 抓包 | 识别加固；拿到密文与明文响应 |
+| 编码层 | 抓包样本逆向 | b64+wrap60 双层编码，byte 级复刻 |
+| 碰壁 | frida / BlackDex | 全部被反调试击落 |
+| **脱壳** | /proc/pid/mem + dex 头修复 | 拿到全部业务代码 |
+| **密钥** | 运行时 dump .so + capstone | RSA n/e、两个 AES IV |
+| **算法** | 反编译源逐行还原 | signToken / 混合加密全链路 |
+| **排障** | 堆取证 + 碰撞搜索 | 揪出最后三个隐蔽 bug |
+| 验证 | 自造请求实测 | 登录/读 6 接口/报名/取消全通 |
+
+## 1. 侦察：先分清"哪一层在挡你"
+
+jadx 打开 APK 只有 31 个文件，`com.netease.nis.wrapper.MyApplication` —— 标准易盾加固。此时不要急着对抗，先抓包（CA 用 tmpfs 覆盖法装进系统证书库 + `adb reverse`）。
+
+抓到的请求形态很有信息量：
+```
+POST https://appdmkj.5idream.net/v2/activity/activities
+standardUA: {fastjson 的 Device JSON}
+d=<一大坨含 %20 的 base64>
+
+→ 响应：明文 JSON {"code":"100","data":{...}}
+```
+
+**请求加密、响应明文**——意味着只需要攻破"请求怎么造"这一个问题。错误码也值得先摸清：`11002` 参数错误（解密失败无差别返回）、`10007` 登录失效、`11111` 业务提示。
+
+## 2. 编码层：宽松 base64 解码器的静默陷阱
+
+把 `d=` 解开（去 %20、b64）得到一串"内层 base64"，里面混着空格和 `=`。第一直觉写个宽松解码器全解——**错**。宽松解码器遇到中段的 `=` 会静默截断，导致段结构判断全错（我一度把密文块数算错）。
+
+正确做法：把内层字符串**按 `=` 边界手工分段**，再逐段解码。最后还原出的编码管线：
+
+```
+密文1_b64(wrap60: 每60有效字符插一个空格) + 密文2_b64(不wrap) + ...
+→ 整体再 b64 → 再 wrap60 → urlencode(仅空格和'='被编码)
+```
+
+验证标准不是"看起来对"，而是 **`encode(decode(x)) == x` 对全部 76 个抓包样本逐字节成立**。这个恒等式后面帮了大忙——它把"编码层"从嫌疑列表里彻底排除。
+
+## 3. 碰壁：反调试的正确姿势是绕开，不是硬刚
+
+- **frida attach**：进程秒死。attach/spawn 都一样。
+- **frida spawn + 反反调试补丁**：native 初始化阶段的检测，脚本还没跑起来人就没了。
+- **BlackDex**（虚拟化脱壳）：模拟器是 x86_64 + arm64 翻译环境，它自己的 arm64 库加载失败，`ClassNotFoundException`。
+
+三次失败后换了思路：**不注入、不 hook，直接读 `/proc/pid/mem`**。root 下 `dd` 转储内存进程不会死（易盾的检测在 native 层盯着 frida/gdb 的特征，没盯着朴素的我）。这个决定是整场战役的转折点。
+
+## 4. 转机一：所谓"抹掉 dex 头"，其实只抹了 4 个字节
+
+社区流传"易盾 anti-dump 会抹 dex 头"。之前的 endian_tag 扫描"失败"让我以为头部全灭。重新看内存大块（6-9MB 的 `r--p` 匿名区）开头：
+
+```
+30333500 a2809802 ef80a9d3... 07000000 78563412 ...
+ ^"035\0"  ^checksum ^signature  ^hdr=0x70 ^endian_tag
+```
+
+**`035\0` 就是 dex magic 的后 4 字节——易盾只把开头的 `dex\n` 4 个字节抹了**，checksum/signature/endian_tag/map_list 全都活着！修复方法朴素到感人：前面补 4 字节 `dex\n` 写回，就是一个完整可反编译的 dex。
+
+四个 dex 全部这样救活，两个实现细节：
+
+1. **有的 dex 需要重算 adler32**（运行时内存里个别字节被改过，jadx 校验和不过，`zlib.adler32(buf[12:])` 重写即可）；
+2. **jadx 吃不下 33MB 的 dex**（JVM 默认堆爆页面文件），用 `--decompilation-mode fallback` + 单 dex 限 `-Xmx1400m` 稳过。
+
+## 5. 转机二：.so 的 .text 在运行时是裸奔的
+
+反编译 dex 立刻看到关键类：
+
+```java
+public class NativeUtil {
+    static { System.loadLibrary("appc-cv-lib"); }
+    public static native String getNetSignModuleKey(Context); // RSA n
+    public static native String getNetSignExponent(Context);  // RSA e
+    public static native String getNetSignPlIV(Context);      // IV
+    public static native String getNetSignReIV(Context);      // IV
+}
+```
+
+密钥全在 native 层——这解释了之前 Java 层挖到的 7 把密钥全军覆没。而静态拆开 `libappc-cv-lib.so`，`.text` 段全是 `udf` 陷阱指令：**so 也是加密的，加载后自解密**。
+
+但它加载后就住在内存里。步骤：
+```bash
+# 1. 从活进程 maps 找到 so 的区段
+adb shell su -c 'cat /proc/<pid>/maps' | grep appc-cv
+# 2. 按区段 dd 出来（skip 用十进制！shell 算术是 32 位的，0x7xxxxxxxxxxx 会溢出）
+adb shell su -c 'dd if=/proc/<pid>/mem bs=4096 skip=<十进制> count=<n> of=/data/local/tmp/so.bin'
+```
+
+capstone 反汇编导出符号，四个 JNI 函数结构一模一样：
+
+```
+bl  <检测函数>
+tst w0, #0xff
+b.eq <System.exit 分支>      ← 检测命中就杀进程（frida 秒死的元凶）
+adrp x1, <字符串地址>          ← 密钥在只读数据段明文躺着
+b    NewStringUTF
+```
+
+**加密的代码挡得住静态分析，挡不住运行时 dump**——反调试函数自己也引用着明文密钥常量。四个值全部到手：RSA n（309 位十进制）、e=65537、ReIV、PlIV。
+
+## 6. 算法链：反编译源里逐行抄
+
+拿到密钥后，加密流程在 Java 层看得一清二楚：
+
+```
+1. params = 业务字段 + 基座{uid, token, jPushId, version} + timestamp + signToken
+2. signToken = MD5( SHA512hex( fastjson(TreeMap(params)) )[1::2][0::2] ).toUpperCase()
+3. dataKey  = 16 个随机 [a-zA-Z0-9]        ← 所以每次密文都不同
+4. rsaPart  = b64( RSA_PKCS1v15(n,e).encrypt(dataKey) )     ← 恒 128B/172 字符
+5. aesPart  = wrap60_b64( AES_CBC_PKCS5(json, dataKey, ReIV) )
+6. d        = wrap60_b64( (aesPart + rsaPart).encode() )    ← 双层编码的由来
+```
+
+段结构之谜同时解开：尾段恒 128B 不是"第二块业务密文"，是 RSA 包着的随机 AES key——教科书式混合加密。
+
+## 7. 最后三个 bug：每一都卡到怀疑人生
+
+自造请求连着吃了五六个 `11002`。此时**千万不要继续猜**，要设计能"一锤定音"的实验：
+
+**坑 1：signToken 是大写**。`Integer.toHexString` 是小写，我照抄了。发现方式：从堆里抠出运行时明文（见下节），对比 `8A6BAEFF...` vs 我的小写。
+
+**坑 2：n 抄录少一位**。308 vs 309 位十进制，肉眼根本看不出。发现方式：**写程序从 dump 里读原始字节比对**——凡是手工转录的常量，一律用脚本从源头提取。
+
+**坑 3：表单编码**。App 只把空格编 `%20`、等号编 `%3D`，base64 里的 `+` 和 `/` 原样裸奔。这说明**服务端是自定义解码器**（不把 `+` 当空格），而 Python requests 默认把 `+` 编成 `%2B`、空格编成 `+`——在自定义解码器眼里全是错的。发现方式：对着抓包样本的编码风格逐字符 diff。
+
+三个坑的共同教训：**"算法对了"不等于"字节对了"。逆向的验收单位永远是字节，不是思路。**
+
+## 8. 堆取证：静态分析闭环不了的，让运行时内存作证
+
+排障时最有杀伤力的两招，都不需要注入：
+
+**招 1：抠运行时明文。** 加密前的明文 json 只在堆里活几秒。重启 App 触发请求 → 7 秒后 dd 出 dalvik 堆（注意：Java 堆是 `[anon:dalvik-main space]`，1GB，别像我一开始只 dump 了无名匿名区扑空）→ grep `signToken`。运行时 json、真实字段集、signToken 大小写全在里面。
+
+**招 2：dataKey 碰撞搜索。** logcat（`EncryptionUtil` tag 在 release 包里照打）泄漏每次请求的 dataKey **密文**和 AES **密文**；堆里则躺着 dataKey **明文**。把堆里所有 16 位字母数字窗口当候选 key，逐个解 AES 首块，看是否解出 `{"jPushId`——几百万候选几分钟跑完。找到真实 dataKey 后，本地完整复刻加密 → 与真实密文逐字节一致，**密码学链路在不上服务器的情况下完成闭环验证**。
+
+## 9. 登录与写接口
+
+- **登录**：`pwd` 字段是 `3DES/ECB/PKCS7`（密钥硬编码 24 字节 ASCII）→ 大写 HEX。源码里留的测试向量 `d("111111")=="C2EC8E96..."` 与当前密钥对不上——**是旧版密钥时代的残留代码，不要信内置向量，要信逐行复刻**。实测一次通过。
+  - 坑：这个密钥 PyCryptodome 会拒绝（奇偶调整后退化成弱 3DES），Java/BC 不管；Python 侧换 `cryptography` 库即可。
+- **报名**：`data` 字段必须是**数组**——无自定义表单时传 `"[]"`，传 `""` 或 `"{}"` 都报"参数为空"。
+- **字段语义靠实测修正**：`status=3` 才是"报名中"；`injoin` 的真实语义是"处于报名窗口内"而不是"我已报名"。
+
+## 10. 方法论
+
+1. **先分层**：传输编码 / 密码学 / 业务字段，三层分开验证，每层都要有 byte 级验收标准。
+2. **反调试绕开而非对抗**：`/proc/pid/mem` + `dd` 不触发任何主流检测，root 就够了。
+3. **别信"头被抹了"的传说**：逐字节看内存里到底剩了什么。修复 dex 可能只需要补 4 个字节。
+4. **加密的 .so 在运行时是明文**：maps 定位区段 → dd → capstone。密钥常量往往就在只读段。
+5. **手工转录的常量必须脚本化提取**，抄错一位的 RSA 模数不会报错，只会让你怀疑人生。
+6. **堆 + logcat 是免费的 oracle**：明文、密钥、字段集都能在运行时抓到；碰撞搜索可以离线闭环验证整条密码学链。
+7. **用服务器的错误码做探测**：`参数为空` vs `参数错误` 的差异能定位缺的字段和格式。
+8. **凡结论必有证据等级**：猜想 < 源码 < 单次实证 < 逐字节一致。写文档时标清楚。
+
+---
+
+## Linux操作系统-课堂笔记 课时5
+
+- **URL**: https://neecoo.dpdns.org/2026-09-linux-5/
+- **Published**: 2026-09-22
+- **Category**: 笔记
+- **Tags**: 学习, 笔记, linux
+
+# 第五课时：文件系统
+
+## 一、文件系统概述
+
+文件系统负责统一管理文件与存储设备：屏蔽底层设备复杂性，为系统内核提供统一的设备操作接口、存储资源调度能力与数据一致性保障，支撑上层应用与内核模块完成文件存取、权限管理、空间分配等核心功能。
+
+Linux 常见的文件系统有 ext4、xfs、vfat 等，可用 `df -T` 查看各分区使用的文件系统类型。
+
+文件名最大长度由 `NAME_MAX`（定义于 `<linux/limits.h>`）限制，默认为 255 **字节**。注意单位是字节而非字符：UTF-8 下一个汉字占 3 字节，故文件名最多约 80 余个汉字；英文字符可达 255 个。
+
+## 二、文件的类型与分类
+
+### 按 ls -l 首字符区分的七种文件类型
+
+| 文件类型 | `ls -l` 首字符 |
+|---|---|
+| 普通文件 | `-` |
+| 目录文件 | `d` |
+| 链接文件 | `l` |
+| 管道文件（FIFO） | `p` |
+| 字符设备文件 | `c` |
+| 块设备文件 | `b` |
+| 套接字文件 | `s` |
+
+### 其他分类维度
+
+| 分类维度 | 类别 |
+|---|---|
+| 数据表示方式 | ASCII 码文件、二进制文件 |
+| 操作过程中的保护级别 | 只读、读写、可执行文件 |
+| 信息流向 | 输入文件、输出文件、输入/输出文件 |
+| 存在时间 | 临时文件、永久文件 |
+
+关于临时文件的存放：/var 存放随系统运行不断变化的数据（日志、缓存、邮件等），其中相当部分是临时性文件；典型的系统临时文件目录是 /tmp。
+
+## 三、文件权限
+
+### ls -l 权限串的解读
+
+`ls -l` 每行开头共 10 个字符：第 1 位是文件类型（见上表），后 9 位每 3 位一组，依次描述三类用户各自的权限：
+
+- **u**：文件所有者（user）
+- **g**：同组用户（group）
+- **o**：其他用户（others）
+
+示例：`-rwxr-xr-x` = 普通文件，所有者可读写执行，同组和其他用户可读和执行。
+
+每组三位固定按 `rwx` 排列，可换算为数字：r=4、w=2、x=1，故 `rwx`=7、`r-x`=5、`rw-`=6。
+
+### 用户、用户组与文件的关系
+
+文件所有者是特定的用户；用户与用户组是**多对多**关系——一个用户可加入多个组，一个组也可包含多个用户。
+
+文件创建时，创建者默认成为所有者、其主组默认成为文件所属组；但所有者是可以修改的：`chown 用户 文件` 修改所有者，`chgrp 组 文件` 修改所属组（也可 `chown 用户:组 文件` 一并修改）。
+
+### rwx 对文件与目录的含义不同
+
+文件不一定有可执行权限；目录通常要有可执行权限——对目录而言，x 代表"可以进入/穿越该目录"，目录没有 x 就无法 `cd` 进去，也无法访问目录内的文件（即使知道文件名）。
+
+| 权限 | 对文件 | 对目录 |
+|---|---|---|
+| r | 可读取文件内容 | 可列出目录内条目（`ls`） |
+| w | 可修改文件内容 | 可在目录内新建、删除、重命名条目 |
+| x | 可执行（内容须是程序/脚本） | 可进入目录（`cd`）、访问目录内文件 |
+
+### chmod 修改权限
+
+文字法：`chmod [who][opt][mode] 文件`——三段参数必须连写，中间无空格。
+
+| 参数 | 取值 | 含义 |
+|---|---|---|
+| who | u / g / o / a | 所有者 / 同组用户 / 其他用户 / 所有用户（默认） |
+| opt | + / - / = | 添加 / 取消 / 重新设定为 |
+| mode | r / w / x | 读 / 写 / 执行 |
+
+示例：
+
+```bash
+chmod u+x a.sh      # 给所有者加执行权限
+chmod go-w file     # 收回同组和其他用户的写权限
+chmod a=rw file     # 所有人重设为读写
+```
+
+数字法：三位八进制数依次对应 u、g、o 的权限和：
+
+| 权限串 | 数字 | 说明 |
+|---|---|---|
+| rwxrwxrwx | 777 | 全权限 |
+| rwxr-xr-x | 755 | 通用权限 |
+
+> ⚠️ **注意**：多用户系统慎用 `chmod -R 777`——递归放开全部权限会让所有用户都能改动、执行这些文件；日常 644（普通文件）/ 755（可执行文件、目录）通常已够用。
+
+## 四、文件内容操作命令
+
+| 命令 | 作用 |
+|---|---|
+| `wc 文件` | 统计文件的行数、单词数、字节数 |
+| `grep 模式 文件` | 查找文件中包含指定模式的行并打印 |
+
+`wc` 默认依次输出"行数、词数、字节数"，常用选项：`-l`（仅行数）、`-w`（仅词数）、`-c`（字节数）、`-m`（字符数）。
+
+`grep` 常用选项：`-n` 显示行号、`-i` 忽略大小写、`-v` 反向匹配（输出不包含模式的行）。
+
+## 五、Shell 命令组合：管道、命令替换、重定向
+
+### 管道 `|`
+
+用于连接多个命令，把前一个命令的输出作为后一个命令的输入：
+
+```bash
+ls -l | wc -l       # 统计当前目录的条目数
+ps -ef | grep ssh   # 在所有进程中查找 ssh 相关进程
+```
+
+### 命令替换 `$(命令)` / `` `命令` ``
+
+把一个命令的执行结果作为字符串，嵌入到另一条命令中：
+
+```bash
+echo "今天是 $(date)"
+```
+
+### wall 广播
+
+`wall 消息` 向当前登录的所有用户发送广播。经典对比：
+
+- `wall date`：把 "date" 这串**字面文本**广播出去，大家看到的就是单词 date；
+- `wall `date``：先执行反引号里的 date 命令，把**当前时间**作为消息广播出去。
+
+后一个例子同时演示了命令替换的作用。
+
+### 重定向
+
+| 符号 | 含义 |
+|---|---|
+| `>` | 输出重定向（写入文件，**覆盖**原内容） |
+| `>>` | 输出重定向（**追加**到文件末尾） |
+| `<` | 输入重定向，命令从文件读取输入 |
+| `2>` | 错误输出重定向 |
+| `2>&1` | 把错误输出合并到标准输出 |
+
+> ⚠️ **注意**：`>` 会先清空目标文件再写入，`cat a > b` 会把 b 的原有内容覆盖掉；想保留原内容用 `>>`。
+
+## 六、vi 编辑器
+
+vi 有三种模式：**命令模式**（打开文件后默认）、**编辑模式**（插入文本）、**ex 模式**（末行模式，按 `:` 进入）。
+
+### 模式切换
+
+- 命令模式 → 编辑模式：`i` 在光标前插入，`a` 在光标后插入，`o` 在下方新建一行并插入，`O` 在上方新建一行并插入；
+- 编辑模式 → 命令模式：按 `Esc`。
+
+### 命令模式
+
+保存退出：`ZZ` 保存并退出。
+
+光标移动：
+
+| 按键 | 作用 |
+|---|---|
+| `h` / `j` / `k` / `l` | 左 / 下 / 上 / 右 |
+| `0` / `$` | 行首 / 行尾 |
+| `gg` / `G` | 文件首行 / 文件末行 |
+| `Ctrl+f` / `Ctrl+b` | 向下 / 向上翻页 |
+
+删除：
+
+| 按键 | 作用 |
+|---|---|
+| `x` | 删除光标处单个字符 |
+| `dd` | 删除（剪切）整行，`ndd` 删除 n 行 |
+| `dw` | 从光标删到下一个单词开头 |
+| `D` | 从光标删到行尾 |
+
+复制粘贴：`yy` 复制整行，`nyy` 复制 n 行；`p` 粘贴到光标下方，`P` 粘贴到上方；`dd` + `p` 即剪切再粘贴。
+
+搜索：在命令模式下直接按 `/内容` 向下搜索、`?内容` 向上搜索（不需要先按 `:` 进入末行模式），`n` 跳到下一个匹配、`N` 跳到上一个。
+
+### ex 模式（末行模式）
+
+| 命令 | 作用 |
+|---|---|
+| `:wq` | 保存并退出 |
+| `:q` | 退出 |
+| `:q!` | 强制退出 |
+| `:set number` | 显示行号（`:set nonu` 取消） |
+
+行号只作为显示提示存在，不属于文件真实内容——保存后文件里并没有这些行号。
+
+> ⚠️ **注意**：`:q!` 不保存修改直接退出，本次未保存的编辑内容会**全部丢失**；确认要丢弃修改时才使用。
+
+## 本课重点速记
+
+1. 文件名长度上限 `NAME_MAX` = 255 **字节**（UTF-8 汉字约占 80 个）。
+2. 七种文件类型：普通 `-`、目录 `d`、链接 `l`、管道 `p`、字符设备 `c`、块设备 `b`、套接字 `s`。
+3. `ls -l` 前 10 位 = 1 位类型 + u/g/o 各 3 位；r=4、w=2、x=1。
+4. 用户与用户组是**多对多**关系；创建者只是默认所有者，可用 `chown`/`chgrp` 修改。
+5. x 对目录 = 可进入；目录无 x 则无法 `cd` 进去。
+6. `chmod` 文字法三段连写（`chmod u+x f`）；数字法 777 全权限、755 通用。
+7. `wc` 统计行/词/字节，`grep` 按模式查找行。
+8. `|` 管道串联命令；`$(...)` 与反引号是命令替换；`>` 覆盖、`>>` 追加、`2>` 错误输出、`2>&1` 合并。
+9. `wall $(date)`（或 `wall `date``）广播的是当前时间，`wall date` 广播的是字面文本。
+10. vi 三模式；`ZZ`/`:wq` 存盘退出，`:q!` 强退丢修改；`yy`/`p` 复制粘贴，`dd` 剪切行，`/` 搜索。
+
+---
+
+## 不使用代理，服务器无法直连github的解决办法
+
+- **URL**: https://neecoo.dpdns.org/2026-09-github-connect/
+- **Published**: 2026-09-22
+- **Category**: 教程
+- **Tags**: 经验, By AI, 踩坑, 学习
+- **Description**: 省流：改成ssh连接
+
+# 现象
+
+服务器上 `git pull` / `git fetch` 对 GitHub 远程仓库报错，两种典型形态：
+
+```text
+fatal: unable to access 'https://github.com/xxx/xxx.git/':
+Failed to connect to github.com port 443 via 127.0.0.1 after 2121 ms:
+Could not connect to server
+```
+
+```text
+error: RPC failed; curl 56 Recv failure; Connection was reset
+```
+
+诡异的地方在于：同一台机器上 `curl https://github.com` 偶尔能返回 200，`gh api` 命令也一切正常——网页偶尔能开、API 全通，唯独 git 的 http 传输死活不行。
+
+# 为什么 http 不行，ssh 却可以
+
+1. **http 的阻断是选择性的**。对 github.com 443 端口的 https 流量，干扰设备做深度包检测（DPI），依据 TLS 握手中明文的 SNI（域名）加后续流量特征决定是否注入 TCP RST。普通网页请求有时放行，而 git 的 smart-http 交互（`GET /xxx.git/info/refs?service=git-upload-pack` 这类长连接会话）稳定命中规则被重置——这就是 "Connection was reset" 的来历。`api.github.com` 解析到另一组边缘节点，不在干扰范围内，所以 gh 命令一直通。
+2. **ssh 没有可供匹配的特征**。ssh 是二进制协议，没有 TLS 也就没有 SNI，DPI 规则匹配不到它。GitHub 官方还专门提供 `ssh.github.com:443`（走 443 端口的 ssh），就是为受限网络准备的备用入口。
+3. **以前配的代理是另一条路**。很多教程让你配 `git config --global http.proxy`，那是把 github 的 http 流量交给本地代理软件——代理活着时 http 也通，代理一关就成了死配置。
+
+结论：把远程连接从 http 换成 ssh，一劳永逸。
+
+# 解决步骤
+
+## 1. 生成一对专用密钥
+
+```bash
+ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519_github -N "" -C "备注名"
+```
+
+## 2. 把公钥加到 GitHub 账号
+
+打开 GitHub 网页 → Settings → SSH and GPG keys → New SSH key，粘贴：
+
+```bash
+cat ~/.ssh/id_ed25519_github.pub
+```
+
+或者[从这里跳转]( https://github.com/settings/ssh/new )
+
+账号级 key 对你名下所有仓库生效（自己有写权限的仓库都能推）。
+
+## 3. 写 ssh 配置
+
+`~/.ssh/config`：
+
+```text
+Host github.com ssh.github.com
+    IdentityFile ~/.ssh/id_ed25519_github
+    IdentitiesOnly yes
+```
+
+## 4. 远程地址从 http 转 ssh
+
+```bash
+git remote set-url origin git@github.com:用户名/仓库名.git
+```
+
+## 5. 验证
+
+```bash
+ssh -T git@github.com
+# Hi 用户名! You've successfully authenticated, but GitHub does not provide shell access.
+```
+
+看到 `Hi 用户名!` 就成了，之后 pull/push 全走 ssh。
+
+# 踩坑记录
+
+## 坑一：残留的 URL 级死代理
+
+报错里那句 `via 127.0.0.1` 说明 git 在走一个不存在的本地代理。这种配置常常是 URL 级的：
+
+```text
+http.https://github.com.proxy = http://127.0.0.1:9645
+```
+
+它**只对 github.com 生效**，所以 `git config --get http.proxy` 查不到、容易被忽略。正确的排查命令：
+
+```bash
+git config --list --show-origin | grep -i proxy
+```
+
+找到后删掉：
+
+```bash
+git config --global --unset http.https://github.com.proxy
+```
+
+## 坑二：22 端口被封
+
+`ssh -T git@github.com` 连不上时，改走 443 端口的 ssh 备用入口：
+
+```bash
+ssh -T -p 443 git@ssh.github.com
+```
+
+对应的 remote 地址写成：
+
+```text
+ssh://git@ssh.github.com:443/用户名/仓库名.git
+```
+
+`~/.ssh/config` 里把 `ssh.github.com` 一并写进 Host 行，两种形式都能用同一把 key。
+
+## 坑三：多用户跑 git（宝塔 www 用户）
+
+web 目录下的仓库往往属于 `www` 用户，面板或 cron 以 www 身份执行 pull 时，ssh 找的是 `/home/www/.ssh` 而不是你的家目录。需要给 www 单独放一份 key：
+
+```bash
+sudo mkdir -p /home/www/.ssh
+sudo cp ~/.ssh/id_ed25519_github ~/.ssh/id_ed25519_github.pub /home/www/.ssh/
+printf 'Host github.com ssh.github.com\n    IdentityFile ~/.ssh/id_ed25519_github\n    IdentitiesOnly yes\n' \
+  | sudo tee /home/www/.ssh/config >/dev/null
+sudo chown -R www:www /home/www/.ssh
+sudo chmod 700 /home/www/.ssh
+sudo chmod 600 /home/www/.ssh/id_ed25519_github /home/www/.ssh/config
+```
+
+手动以 www 身份操作时记得 `sudo -H -u www git ...`，`-H` 让 HOME 指向 `/home/www`，否则读到的还是错误的 ssh 配置。
+
+# 验证清单
+
+- `ssh -T git@github.com` 返回 `Hi 用户名!`
+- `git fetch --dry-run` 无报错
+- `git config --list --show-origin | grep -i proxy` 无残留死代理
+- 涉及 www 用户的场景：`sudo -H -u www ssh -T git@github.com` 同样通过
+
+---
+
+## Linux操作系统-课堂笔记 课时4
+
+- **URL**: https://neecoo.dpdns.org/2026-09-linux-4/
+- **Published**: 2026-09-18
+- **Category**: 笔记
+- **Tags**: 学习, 笔记, linux
+
+# 第四课时：文件操作、查找、链接与用户管理
+
+## 1. touch 命令
+
+`touch` 用于创建空文件，或修改文件的时间戳。
+
+### 1.1 基本用法
+
+```bash
+touch 文件名
+```
+
+- 如果文件不存在，默认会创建一个空文件。
+- 如果文件已存在，默认更新文件的访问时间和修改时间。
+
+### 1.2 常用选项
+
+| 选项 | 作用 |
+|---|---|
+| `-a` | 只修改文件的存取时间，即 atime |
+| `-m` | 只修改文件的修改时间，即 mtime |
+| `-c` | 不创建文件；文件不存在时不创建 |
+| `-r ref_file` | 使用参考文件 `ref_file` 的时间戳 |
+| `-t time` | 使用指定时间，格式为 `[[CC]YY]MMDDhhmm[.ss]` |
+| `-d 字符串` | 使用指定日期时间字符串 |
+
+示例：
+
+```bash
+touch file.txt
+touch -a file.txt
+touch -m file.txt
+touch -c nofile.txt
+touch -r ref.txt file.txt
+touch -t 202609181200 file.txt
+```
+
+---
+
+## 2. mv 命令
+
+`mv` 用于移动文件或目录，也常用于重命名。
+
+### 2.1 基本用法
+
+```bash
+mv [选项] 源文件或目录 目标文件或目录
+```
+
+示例：
+
+```bash
+mv file1 file2          # 将 file1 重命名为 file2
+mv file1 /tmp/          # 将 file1 移动到 /tmp 目录
+mv dir1 /tmp/           # 将 dir1 移动到 /tmp 目录
+mv dir1 dir2            # 若 dir2 不存在，则重命名；若存在，则移动到 dir2 内
+```
+
+### 2.2 常用选项
+
+| 选项 | 作用 |
+|---|---|
+| `-i` | 覆盖前提示确认 |
+| `-f` | 强制覆盖，不提示 |
+| `-n` | 不覆盖已存在文件 |
+| `-v` | 显示移动过程 |
+| `-u` | 仅在源文件比目标文件新，或目标不存在时移动 |
+
+示例：
+
+```bash
+mv -i file1 file2
+mv -f file1 /tmp/
+mv -v file1 /tmp/
+```
+
+---
+
+## 3. cat 命令
+
+`cat` 用于查看文件内容，也可以连接多个文件并输出。
+
+### 3.1 基本用法
+
+```bash
+cat 文件名
+cat 文件1 文件2
+```
+
+示例：
+
+```bash
+cat /etc/passwd
+cat file1 file2
+```
+
+### 3.2 常用选项
+
+| 选项 | 作用 |
+|---|---|
+| `-n` | 显示行号，包括空行 |
+| `-b` | 显示行号，但不包括空行 |
+| `-A` | 显示不可见字符，如制表符、换行符等 |
+| `-s` | 将连续多个空行压缩为一个空行 |
+
+示例：
+
+```bash
+cat -n file.txt
+cat -b file.txt
+cat -A file.txt
+```
+
+补充：
+
+- 查看大文件时，推荐使用 `less` 或 `more` 分页查看。
+- 例如：
+
+```bash
+less /etc/passwd
+more /etc/passwd
+```
+
+---
+
+## 4. vim 编辑器
+
+`vim` 是 Linux 中常用的文本编辑器。
+
+### 4.1 启动与退出
+
+```bash
+vim 文件名
+```
+
+常用退出命令：
+
+| 命令 | 作用 |
+|---|---|
+| `:w` | 写入保存 |
+| `:q` | 退出 |
+| `:wq` | 保存并退出 |
+| `:x` | 保存并退出 |
+| `:q!` | 不保存，强制退出 |
+
+### 4.2 模式与常用操作
+
+vim 常见模式：
+
+- 普通模式：默认模式，用于移动光标、删除、复制、粘贴等。
+- 插入模式：用于输入文本。
+- 末行模式：用于输入 `:` 开头的命令，如保存、退出、替换等。
+- 可视模式：用于选择文本块。
+
+进入插入模式：
+
+| 按键 | 作用 |
+|---|---|
+| `i` | 在光标前插入 |
+| `a` | 在光标后追加 |
+| `o` | 在当前行下方新建一行并插入 |
+| `O` | 在当前行上方新建一行并插入 |
+
+保存与写入：
+
+```vim
+:w
+```
+
+追加与插入：
+
+```vim
+i
+a
+```
+
+说明：
+
+- `i` 是普通模式下进入插入模式，不是在末行模式输入 `:i`。
+- `a` 是普通模式下进入追加插入模式，不是在末行模式输入 `:a`。
+- `:w` 是末行模式下的写入保存命令。
+
+其他常用末行命令：
+
+```vim
+:set nu        " 显示行号
+:set nonu      " 取消行号
+:%s/old/new/g  " 全文替换
+```
+
+---
+
+## 5. 分屏显示
+
+Windows 中可使用：
+
+```cmd
+dir /p
+```
+
+Linux 中不使用 `dir /p`，对应分屏显示方式为：
+
+```bash
+ls | more
+ls | less
+more 文件名
+less 文件名
+```
+
+示例：
+
+```bash
+ls | less
+cat /etc/passwd | more
+less /var/log/messages
+```
+
+说明：
+
+- `more` 只能向前翻页。
+- `less` 可以前后翻页，功能更强。
+- 管道符 `|` 用于将前一个命令的输出作为后一个命令的输入。
+
+---
+
+## 6. head 与 tail 命令
+
+### 6.1 head
+
+`head` 用于显示文件开头内容，默认显示前 10 行。
+
+```bash
+head 文件名
+head -n 20 文件名
+head -c 100 文件名
+```
+
+示例：
+
+```bash
+head /etc/passwd
+head -n 5 /etc/passwd
+```
+
+### 6.2 tail
+
+`tail` 用于显示文件末尾内容，默认显示后 10 行。
+
+```bash
+tail 文件名
+tail -n 20 文件名
+tail -f 文件名
+```
+
+示例：
+
+```bash
+tail /etc/passwd
+tail -n 5 /etc/passwd
+tail -f /var/log/messages
+```
+
+说明：
+
+- `-n` 指定显示行数。
+- `-f` 持续跟踪文件新增内容，常用于查看日志。
+- `-F` 与 `-f` 类似，但文件被轮转后仍能继续跟踪。
+
+---
+
+## 7. find 命令
+
+`find` 用于查找文件和目录，默认输出文件路径，不显示文件内容。
+
+### 7.1 基本语法
+
+```bash
+find pathname -options [-print -exec -ok ...]
+```
+
+说明：
+
+- `pathname`：find 命令所查找的目录路径。
+- 如果没写路径，默认在当前目录下查找。
+- 推荐从根目录 `/` 开始查找，但全盘查找速度较慢。
+- `-print`：输出查找到的路径，通常是默认动作。
+- `-exec`：对查找到的文件执行命令。
+- `-ok`：与 `-exec` 类似，但执行前会提示确认。
+
+### 7.2 常用选项
+
+| 选项 | 作用 |
+|---|---|
+| `-name` | 按文件名查找 |
+| `-iname` | 按文件名查找，忽略大小写 |
+| `-type` | 按文件类型查找，如 `f` 普通文件、`d` 目录、`l` 符号链接 |
+| `-perm` | 按权限查找 |
+| `-size` | 按文件大小查找 |
+| `-mtime` | 按修改时间查找 |
+| `-user` | 按所有者查找 |
+| `-group` | 按所属组查找 |
+| `-print` | 输出路径 |
+| `-exec` | 对结果执行命令 |
+| `-ok` | 对结果执行命令前提示确认 |
+
+示例：
+
+```bash
+find / -name "*.conf"
+find /home -type f -name "*.txt"
+find / -type d -name "test"
+find / -perm 644
+find / -size +100M
+find / -user tom
+find / -name "*.log" -exec ls -l {} \;
+find / -name "*.tmp" -ok rm {} \;
+```
+
+### 7.3 通配符
+
+| 通配符 | 含义 |
+|---|---|
+| `*` | 匹配任意多个字符 |
+| `?` | 匹配任意单个字符 |
+
+示例：
+
+```bash
+find / -name "*.conf"
+find / -name "file?.txt"
+```
+
+注意：
+
+- 使用通配符时通常要加引号，避免被 shell 提前展开。
+- 例如应写：
+
+```bash
+find / -name "*.conf"
+```
+
+而不是随意写：
+
+```bash
+find / -name *.conf
+```
+
+### 7.4 管道符
+
+管道符 `|` 用于将前一个命令的输出作为后一个命令的输入。
+
+示例：
+
+```bash
+find / -name "*.conf" | less
+ps aux | grep ssh
+rpm -qa | grep foo
+```
+
+---
+
+## 8. ln 命令：链接
+
+`ln` 用于创建链接文件。链接文件可以与源文件内容同步。
+
+### 8.1 硬链接
+
+默认情况下，`ln` 创建的是硬链接。
+
+```bash
+ln 源文件 硬链接名
+```
+
+特点：
+
+- 硬链接与源文件指向同一个 inode。
+- 链接文件与源文件产生的关联即硬链接。
+- 删除源文件后，硬链接仍然保留文件内容。
+- 文件内容不会因为删除源文件而立即消失，直到所有硬链接都被删除。
+- 硬链接不能跨文件系统。
+- 通常不能为目录创建硬链接。
+
+示例：
+
+```bash
+ln file.txt hard.txt
+ls -li file.txt hard.txt
+```
+
+### 8.2 软链接
+
+软链接相当于指针，也叫符号链接。
+
+```bash
+ln -s 源文件 软链接名
+```
+
+特点：
+
+- 软链接是一个独立文件，指向目标路径。
+- 可以跨文件系统。
+- 可以为目录创建软链接。
+- 如果源文件被删除，软链接会变成断链。
+- 使用 `ls -l` 查看时，软链接通常显示为 `链接名 -> 目标路径`。
+
+示例：
+
+```bash
+ln -s /home/tom/file.txt soft.txt
+ls -l soft.txt
+```
+
+### 8.3 硬链接与软链接对比
+
+| 类型 | 命令 | 特点 |
+|---|---|---|
+| 硬链接 | `ln 源 目标` | 同一 inode，不能跨文件系统，通常不能链接目录 |
+| 软链接 | `ln -s 源 目标` | 类似快捷方式，可跨文件系统，可链接目录，源删除后断链 |
+
+---
+
+## 9. 用户与用户组管理
+
+### 9.1 用户分类
+
+Linux 中常见三类用户：
+
+- root 用户：超级用户，UID 为 `0`。
+- 系统用户：用于运行系统服务，UID 通常为 `1~999`，旧系统中常为 `1~499`。
+- 普通用户：供登录使用，UID 通常从 `1000` 开始，旧系统中常从 `500` 开始。
+
+说明：
+
+- 所有用户 ID 均从 500 开始是不准确的。
+- 正确规则是：
+  - root 的 UID 是 `0`。
+  - 系统用户 UID 通常为 `1~999`。
+  - 普通用户 UID 通常从 `1000` 开始，并按创建时间先后顺序累加。
+  - 旧版系统中普通用户可能从 `500` 开始。
+
+### 9.2 useradd：添加用户
+
+```bash
+useradd 用户名
+```
+
+特点：
+
+- 创建用户时通常会自动创建同名宿主目录。
+- 默认创建出来的是普通用户。
+- 宿主目录通常在 `/home/用户名`。
+- 是否自动创建宿主目录受 `/etc/login.defs` 等配置影响。
+
+常用选项：
+
+| 选项 | 作用 |
+|---|---|
+| `-m` | 创建宿主目录 |
+| `-M` | 不创建宿主目录 |
+| `-d 目录` | 指定宿主目录 |
+| `-g 组名` | 指定主工作组 |
+| `-G 组名` | 指定附加组 |
+| `-u UID` | 指定用户 ID |
+| `-s shell` | 指定登录 shell |
+
+示例：
+
+```bash
+useradd tom
+useradd -m tom
+useradd -d /home/tom -m tom
+useradd -g users tom
+```
+
+### 9.3 passwd：设置密码
+
+`passwd` 用于创建或修改用户密码。
+
+```bash
+passwd 用户名
+```
+
+示例：
+
+```bash
+passwd tom
+```
+
+说明：
+
+- root 用户可以给其他用户设置密码。
+- 普通用户直接执行 `passwd` 可以修改自己的密码。
+- 密码并不是存放在 `/etc/passwd` 中。
+- `/etc/passwd` 存放用户账户信息，不存放密码。
+- 密码实际存放在 `/etc/shadow` 中。
+- `/etc/passwd` 每行常见字段：
+
+```text
+用户名:密码占位符:UID:GID:描述:宿主目录:登录Shell
+```
+
+示例：
+
+```text
+tom:x:1001:1001::/home/tom:/bin/bash
+```
+
+### 9.4 用户与工作组
+
+- Linux 的每个用户都要隶属于一个工作组。
+- 每个用户有一个主工作组，还可以属于多个附加工作组。
+- 注册用户通常有默认工作组，默认组名常与用户名相同。
+- 但组 ID 不一定与用户 ID 相同，可以手动指定。
+- 查看用户信息：
+
+```bash
+id 用户名
+groups 用户名
+```
+
+示例：
+
+```bash
+id tom
+groups tom
+```
+
+### 9.5 groupadd：添加用户组
+
+```bash
+groupadd 组名
+```
+
+示例：
+
+```bash
+groupadd dev
+```
+
+### 9.6 将用户添加到工作组
+
+创建用户时指定主组：
+
+```bash
+useradd -g 组名 用户名
+```
+
+将已有用户加入附加组：
+
+```bash
+usermod -aG 组名 用户名
+```
+
+示例：
+
+```bash
+useradd -g dev tom
+usermod -aG dev tom
+```
+
+说明：
+
+- `-g` 指定主工作组。
+- `-G` 指定附加工作组。
+- `-aG` 表示追加到附加组，不删除原有附加组。
+
+### 9.7 usermod：修改用户组
+
+常用方式：
+
+```bash
+usermod -g 新主组 用户名
+usermod -aG 附加组 用户名
+```
+
+示例：
+
+```bash
+usermod -g dev tom
+usermod -aG test tom
+```
+
+`usermod` 还可以修改：
+
+- 用户宿主目录
+- 登录名
+- UID
+- 登录 shell
+- 用户组等
+
+### 9.8 userdel：删除用户
+
+```bash
+userdel 用户名
+```
+
+示例：
+
+```bash
+userdel tom
+```
+
+说明：
+
+- 默认情况下，`userdel` 只删除用户账户。
+- 删除用户时，宿主目录不会自动清除。
+- 如果要同时删除宿主目录和邮件池，使用：
+
+```bash
+userdel -r 用户名
+```
+
+示例：
+
+```bash
+userdel -r tom
+```
+
+---
+
+---
+
+## Linux操作系统-课堂笔记 课时1-3
+
+- **URL**: https://neecoo.dpdns.org/2026-09-linux/
+- **Published**: 2026-09-10
+- **Category**: 笔记
+- **Tags**: 笔记, 学习, linux
+
+# 课时1：Unix、设备接口与命名
+
+## 1. Unix 的地位
+
+- Unix 是第一个现代操作系统。
+- 【补充】Linux 是类 Unix 操作系统，继承了 Unix 的多用户、多任务、一切皆文件等设计思想。
+
+## 2. 设备命名：IDE 与非 IDE
+
+- IDE 接口设备：HD 设备，也就是 IDE 硬盘。
+- 非 IDE 接口设备：SD 设备，例如外接设备、SCSI 硬盘。
+- 【补充】这些设备文件通常放在 `/dev` 目录下，例如 `/dev/hda`、`/dev/sda`。
+
+### IDE 设备命名
+
+IDE 设备下面按接口名区分：
+
+| IDE 接口 | 位置 | 设备名 |
+|---|---|---|
+| IDE0 | master | `hda` |
+| IDE0 | slave | `hdb` |
+| IDE1 | master | `hdc` |
+| IDE1 | slave | `hdd` |
+
+### 非 IDE 接口命名
+
+- 非 IDE 接口命名：`sdX`
+- 例如：`sda`、`sdb`、`sdc` 等。
+- 【补充】`sdX` 中的 `X` 表示第几块设备，后面还可以加数字表示分区，如 `sda1`、`sda2`。
+
+## 3. Linux 设备命名规则
+
+- Linux 对设备命名只看设备接在哪个接口。
+- 【补充】传统命名规则下，IDE 硬盘常用 `hd`，SCSI、SATA、USB 等设备常用 `sd`。设备文件化管理也是 Linux 的重要特点。
+
+---
+
+# 课时2：设备文件、挂载、目录与分区
+
+## 1. 设备文件化管理
+
+- Linux 将设备进行文件化管理。
+- 【补充】设备在 Linux 中通常表现为 `/dev` 下的设备文件，可以像文件一样被访问和操作。
+
+## 2. mount 挂载命令
+
+- `mount` 是挂载命令。
+- 用法：
+
+```bash
+mount 设备 挂载点
+```
+
+- 默认挂载在根目录。
+- 【补充】根文件系统通常挂载在 `/`；其他设备一般挂载到 `/mnt`、`/media` 等目录。挂载点必须是一个已经存在的目录。
+- 【补充】卸载命令是：
+
+```bash
+umount 挂载点
+```
+
+示例：
+
+```bash
+mount /dev/sdb1 /mnt
+umount /mnt
+```
+
+## 3. Shell 提示符
+
+- 提示符形式：`用户名@计算机名 $当前目录`
+- 当当前用户和当前目录重名时，会显示 `~` 符号。
+- 【更准确说法】当当前目录就是该用户的宿主目录时，提示符中会显示 `~`。宿主目录通常与用户名同名，例如用户 `tom` 的宿主目录通常是 `/home/tom`。
+- 【补充】普通用户提示符常以 `$` 结尾，root 用户常以 `#` 结尾。
+
+示例：
+
+```bash
+tom@linux:~$
+root@linux:/root#
+```
+
+## 4. su 命令
+
+- `su` 命令：switch user，用于切换用户。
+- 【补充】常用方式：
+
+```bash
+su 用户名
+su - 用户名
+```
+
+- `su - 用户名` 会同时切换用户环境，例如宿主目录、环境变量等。
+- 从普通用户切换到 root，通常需要输入 root 密码。
+
+## 5. 宿主目录
+
+- 宿主目录：与用户名同名的目录。
+- 【补充】普通用户的宿主目录通常在 `/home/用户名`，例如 `/home/tom`。
+- root 用户的宿主目录是 `/root`。
+
+## 6. 根目录常见目录说明
+
+| 目录 | 原始笔记说明 | 补充说明 |
+|---|---|---|
+| `/bin` | 二进制目录 | 存放基本用户命令，如 `ls`、`cp` 等 |
+| `/dev` | 设备目录 | 存放设备文件 |
+| `/home` | 所有用户宿主目录的父目录 | 普通用户家目录通常在这里 |
+| `/lost+found` | 回收站 | 更准确说：文件系统修复后找回的孤立文件存放处，不是普通回收站 |
+| `/mnt` | 挂载点目录 | 常用于临时挂载外部设备或文件系统 |
+| `/sbin` | 系统二进制 | 存放系统管理命令 |
+| `/tmp` | 临时目录 | 存放临时文件，可能重启后清空 |
+| `/var` | 临时目录 | 存放可变数据，如日志、缓存、队列等 |
+| `/boot` | 系统引导文件目录 | 存放内核、引导程序等 |
+| `/etc` | 等价 Windows system32 目录；系统级服务/应用存放目录 | 更准确：主要存放系统和服务配置文件 |
+| `/media` | 光驱；只有在 XII 下才自动挂载 | XII 是图形用户界面；通常指 X11/X Window。可移动媒体常自动挂载到这里 |
+| `/root` | 超级用户目录 | root 用户的家目录 |
+| `/selinux` | 系统防火墙 | 更准确：SELinux 是安全增强模块，不是传统防火墙 |
+| `/sys` | 系统目录 | sysfs，提供内核和设备信息 |
+| `/usr` | 等价 Windows program 目录；应用文件安装目录 | `/usr` 存放用户级程序、库和资源 |
+
+## 7. 分区
+
+### 分区类型
+
+- 主分区
+- 扩展分区
+- 逻辑分区
+
+### 分区规则
+
+- 主分区 + 扩展分区个数 `≤ 4`。
+- 主分区至少有一个。
+- 扩展分区可以没有。
+- 逻辑分区的编号必须从 `5` 开始。
+- 【补充】扩展分区不能直接像主分区那样使用，它主要用于容纳逻辑分区。逻辑分区建立在扩展分区内部。
+- 【补充】在 MBR 分区表中，常见设备分区编号为：`1~4` 给主分区或扩展分区，`5` 开始给逻辑分区。例如 `/dev/sda1`、`/dev/sda5`。
+
+---
+
+# 第三课时：RPM 包管理、ls 命令与文件目录操作
+
+## 1. RPM 包管理
+
+### 1.1 RPM 概念
+
+- RPM：Red Hat Package Manager，红帽包管理器。
+- RPM 是 Red Hat 系列 Linux 中常用的软件包管理方式，如 RHEL、CentOS、Fedora。
+- RPM 包文件通常以 `.rpm` 结尾。
+
+示例：
+
+```bash
+foo-1.0-i386.rpm
+```
+
+### 1.2 RPM 包命名与架构
+
+RPM 包名常见格式：
+
+```text
+软件名-版本号-发布号.架构.rpm
+```
+
+示例：
+
+```text
+foo-1.0-1.i386.rpm
+```
+
+常见架构：
+
+| 架构 | 含义 |
+|---|---|
+| `i386`、`i586`、`i686` | 32 位 x86 架构 |
+| `x86_64` | 64 位 x86 架构 |
+| `noarch` | 与硬件架构无关 |
+| `aarch64` | 64 位 ARM 架构 |
+
+所以：
+
+- `foo-1.0-i386.rpm` 是 32 位软件包。
+- 64 位软件包通常表示为 `x86_64`，不是 `i586`。
+- `i586` 仍属于 32 位 x86 架构。
+
+### 1.3 RPM 常用操作
+
+| 操作 | 命令 | 说明 |
+|---|---|---|
+| 安装 | `rpm -ivh 包名.rpm` | `-i` 安装，`-v` 显示详细过程，`-h` 显示进度 |
+| 更新/升级 | `rpm -Uvh 包名.rpm` | `-U` 升级，若未安装通常会安装 |
+| 仅升级已安装包 | `rpm -Fvh 包名.rpm` | 只升级已经安装的软件包 |
+| 查询已安装包 | `rpm -q 软件包名` | 查询某个包是否安装 |
+| 查询所有已安装包 | `rpm -qa` | 列出所有已安装 RPM 包 |
+| 查询包内文件 | `rpm -ql 软件包名` | 列出该包安装的文件 |
+| 查询包信息 | `rpm -qi 软件包名` | 显示软件包详细信息 |
+| 查询文件属于哪个包 | `rpm -qf 文件路径` | 查看文件由哪个 RPM 包提供 |
+| 查询未安装的 RPM 文件 | `rpm -qp 包名.rpm` | 查询 RPM 文件本身信息 |
+| 卸载 | `rpm -e 软件包名` | 删除已安装的 RPM 包 |
+| 验证 | `rpm -V 软件包名` | 校验已安装包文件是否被修改 |
+
+示例：
+
+```bash
+rpm -ivh foo-1.0-1.i386.rpm
+rpm -Uvh foo-1.0-1.i386.rpm
+rpm -q foo
+rpm -qa | grep foo
+rpm -ql foo
+rpm -qi foo
+rpm -e foo
+```
+
+补充：
+
+- RPM 安装时不会自动解决依赖关系。
+- 如果缺少依赖，通常使用 `yum` 或 `dnf` 安装，它们可以自动处理依赖。
+- 例如：
+
+```bash
+yum install ./foo-1.0-1.i386.rpm
+dnf install ./foo-1.0-1.i386.rpm
+```
+
+---
+
+## 2. ls 命令
+
+`ls` 用于列出目录内容。
+
+### 2.1 常用选项
+
+| 选项 | 作用 |
+|---|---|
+| `-a` | 显示所有文件和子目录，包括以 `.` 开头的隐藏文件 |
+| `-l` | 长格式显示文件权限、所有者、文件大小、修改时间等 |
+| `-r` | 反向排序 |
+| `-t` | 按修改时间排序，新的在前 |
+| `-tr` | 按修改时间反向排序，旧的在前 |
+| `-A` | 同 `-a`，但不显示 `.` 和 `..` |
+| `-R` | 递归展示全部子目录内容 |
+| `-h` | 与 `-l` 合用，以人类可读方式显示大小，如 `K`、`M`、`G` |
+| `-d` | 显示目录本身，而不是目录内容 |
+| `-i` | 显示 inode 号 |
+| `-S` | 按文件大小排序 |
+| `--color=auto` | 不同文件类型用不同颜色显示 |
+
+说明：
+
+- `ll` 通常是 `ls -l` 的别名，不是独立命令。
+- `ls -r` 表示反向排序。
+- 按修改时间排序使用 `ls -t`。
+- 按修改时间反向排序使用 `ls -tr`。
+
+### 2.2 常用示例
+
+```bash
+ls
+ls -a
+ls -l
+ls -A
+ls -R
+ls -lt
+ls -ltr
+ls -lh
+ls -ld /home
+```
+
+示例说明：
+
+```bash
+ls -a       # 显示所有文件，包括隐藏文件
+ls -l       # 长格式显示
+ls -A       # 显示隐藏文件，但不显示 . 和 ..
+ls -R       # 递归显示所有子目录
+ls -lt      # 按修改时间排序，新的在前
+ls -ltr     # 按修改时间反向排序，旧的在前
+ls -lh      # 长格式并以人类可读方式显示大小
+ls -ld dir  # 显示目录本身信息
+```
+
+---
+
+## 3. 绝对路径与相对路径
+
+### 3.1 绝对路径
+
+- 从根目录 `/` 开始写起的路径。
+- 例如：
+
+```bash
+/home/tom/test.txt
+/etc/passwd
+/var/log/messages
+```
+
+### 3.2 相对路径
+
+- 从当前目录开始写起的路径。
+- 例如：
+
+```bash
+test.txt
+./test.txt
+../tom/test.txt
+```
+
+### 3.3 特殊路径符号
+
+| 符号 | 含义 |
+|---|---|
+| `.` | 当前目录 |
+| `..` | 上一级目录 |
+| `~` | 当前用户的宿主目录 |
+| `~user` | 指定用户的宿主目录 |
+| `-` | 上一个工作目录，常用于 `cd -` |
+
+示例：
+
+```bash
+cd /home/tom
+cd ..
+cd ~
+cd -
+```
+
+---
+
+## 4. 目录与文件操作命令
+
+### 4.1 mkdir：创建文件夹
+
+- `mkdir` 用于创建目录。
+- 常用选项：
+
+| 选项 | 作用 |
+|---|---|
+| `-p` | 递归创建目录，父目录不存在时一并创建 |
+| `-m` | 创建目录时直接设置权限 |
+
+示例：
+
+```bash
+mkdir test
+mkdir -p /home/tom/a/b/c
+mkdir -m 755 testdir
+```
+
+### 4.2 rmdir：删除文件夹
+
+- `rmdir` 用于删除空目录。
+- 只能删除空目录。
+- 如果目录非空，会报错。
+- 常用选项：
+
+| 选项 | 作用 |
+|---|---|
+| `-p` | 递归删除空目录链 |
+
+示例：
+
+```bash
+rmdir test
+rmdir -p a/b/c
+```
+
+### 4.3 rm：删除文件或目录
+
+- `rm` 用于删除文件或目录。
+- 默认不能删除目录，删除目录需要加 `-r` 或 `-d`。
+- 常用选项：
+
+| 选项 | 作用 |
+|---|---|
+| `-r` | 递归删除目录及其内容 |
+| `-f` | 强制删除，不提示 |
+| `-i` | 删除前提示确认 |
+| `-d` | 删除空目录 |
+| `-v` | 显示删除过程 |
+
+示例：
+
+```bash
+rm file.txt
+rm -i file.txt
+rm -r dir
+rm -rf dir
+rm -d emptydir
+```
+
+注意：
+
+- `rm -rf` 非常危险，使用时必须确认路径。
+- 不要随意执行类似 `rm -rf /` 的命令。
+
+---
+
+---
+
+## 支付宝小程序源码提取实录：从模拟器到完整源码
+
+- **URL**: https://neecoo.dpdns.org/2026-09-alipay-mini-program-get/
+- **Published**: 2026-09-05
+- **Category**: 教程
+- **Tags**: By AI, 经验, 逆向, 小程序
+
+# 支付宝小程序源码提取实录：从模拟器到完整源码
+
+> 本文记录一种从零开始提取支付宝小程序离线包并解出源码的完整流程。整体思路：**在模拟器中打开目标小程序 → 从支付宝本地数据库中找到该小程序的离线包 CDN 地址 → 直接下载官方离线包 → 解包得到源码**。
+>
+> 全程不需要逆向 so、不需要解密，因为支付宝小程序的离线包在官方 CDN 上是公开可下载的，真正难的只是「知道去哪里找这个地址」。
+>
+> 仅供学习研究，请勿用于任何侵权用途。
+
+## 一、原理说明
+
+支付宝小程序（包括 H5 离线应用）在客户端内由几套容器管理：
+
+| 存储/数据库 | 作用 |
+|---|---|
+| `files/nebulaInstallApps/` | 老版 Nebula 容器的离线包目录，存放基础库、公共资源包（明文 tar） |
+| `databases/nebula_app.db` | Nebula 容器的应用注册表 |
+| `databases/nebulax_app.db` | Nebula 容器新版注册表（含资源表和插件表） |
+| `databases/xriver_app.db` | **xriver 容器（当前小程序主力容器）的应用注册表，业务小程序的信息基本都在这里** |
+
+关键点：
+
+1. 业务小程序的离线包本体在本地是加密缓存的（`files/Sandbox/B_xxx/database/ccdn/` 下的 `.dc`/`.mf` 文件），直接解密很麻烦；
+2. 但注册表数据库 `xriver_app.db` 是**标准未加密 SQLite**，里面的 `nebulax_resource_app_table` 表记录了每个小程序的 `package_url` —— 即官方 CDN 上的离线包下载地址（形如 `https://mdn.alipayobjects.com/ccdn/...`）；
+3. 该 CDN 地址可以直接用 HTTP GET 下载，下载得到的文件是一个 **ZIP**，内部包含明文的 `<appId>.tar`，解包即为源码。
+
+所以流程简化为：**root 模拟器 → 拷出 xriver_app.db → 查库拿 package_url → 下载 → 两层解包**。
+
+## 二、环境与工具
+
+| 工具 | 说明 |
+|---|---|
+| MuMu 模拟器 12（Android 12） | 任意**带 root** 的 Android 模拟器均可（MuMu 默认开放 root） |
+| MuMu 自带 adb | 路径：`<MuMu安装目录>\nx_main\adb.exe`，其他模拟器请替换为自己目录下的 adb |
+| 支付宝 App | 模拟器内安装并**登录**（不登录打不开小程序） |
+| Python 3 | 标准库即可（`sqlite3`、`tarfile`），无需额外安装第三方包 |
+| PowerShell / curl | 用于下载离线包 |
+
+## 三、完整流程
+
+### 步骤 1：在模拟器中打开目标小程序
+
+在模拟器的支付宝里搜索并打开目标小程序，随便点几个页面，停留几秒钟。
+
+目的：让客户端向服务端请求该小程序的元信息并写入本地数据库 `xriver_app.db`。离线包本体此时可能只下载了加密缓存，无所谓——我们要的只是数据库里的 CDN 地址。
+
+### 步骤 2：adb 连接模拟器并确认 root
+```powershell
+# 替换为你自己的 adb 路径（MuMu 自带 adb 在 <MuMu安装目录>\nx_main\adb.exe）
+$adb = "<adb路径>"
+
+# 看设备是否已连接
+& $adb devices
+# 输出的第一列即设备 serial（单开模拟器通常为 emulator-5554）：
+# emulator-5554          device product:... model:...
+
+# 后续命令统一用这个变量指定设备
+$dev = "<设备serial>"
+
+# 确认 root 可用（MuMu 默认有 su）
+& $adb -s $dev shell "su -c id"
+# 输出应包含 uid=0(root)
+```
+
+### 步骤 3：拷出支付宝的小程序注册表数据库
+
+`/data/data/` 属于应用私有目录，adb shell 用户无权直接读取，需要通过 `su` 先复制到 `/data/local/tmp/`：
+
+```powershell
+# 把几个相关数据库都拷出来（核心是 xriver_app.db）
+& $adb -s $dev shell 'su -c "cp /data/data/com.eg.android.AlipayGphone/databases/xriver_app.db /data/local/tmp/x.db; cp /data/data/com.eg.android.AlipayGphone/databases/nebulax_app.db /data/local/tmp/nx.db; cp /data/data/com.eg.android.AlipayGphone/databases/nebula_app.db /data/local/tmp/n.db; chmod 644 /data/local/tmp/*.db"'
+
+# 拉取到 Windows 本地
+& $adb -s $dev pull /data/local/tmp/x.db .\x.db
+& $adb -s $dev pull /data/local/tmp/nx.db .\nx.db
+& $adb -s $dev pull /data/local/tmp/n.db .\n.db
+```
+
+### 步骤 4：查询数据库，拿到目标小程序的 CDN 离线包地址
+
+`xriver_app.db` 中的两张核心表：
+
+- `nebulax_resource_app_table` —— 所有已知晓的小程序资源信息（`app_id`、`name`、`version`、`package_url`、`main_url` 等）
+- `nebulax_app_install_table` —— 已安装记录（按 `updateAppTime` 排序，最近打开的小程序会排在最前，即使 `installedPath` 为空也说明刚被访问过）
+
+用 Python 标准库查询（把 `<目标小程序名关键词>` 替换成实际名称的片段，保存为 `find_app.py`）：
+
+```python
+import sqlite3
+
+con = sqlite3.connect("x.db")
+cur = con.cursor()
+
+# 方法一：按最近使用时间排序，刚打开的小程序会排在最前
+for r in cur.execute("""
+    SELECT a.app_id, a.name, a.version, a.package_url
+    FROM nebulax_resource_app_table a
+    JOIN nebulax_app_install_table i ON a.app_id = i.appId
+    ORDER BY CAST(i.updateAppTime AS INTEGER) DESC
+    LIMIT 10
+"""):
+    print(r)
+
+# 方法二：按名称模糊搜索目标小程序
+keyword = "<目标小程序名关键词>"
+for r in cur.execute("""
+    SELECT app_id, name, version, package_url
+    FROM nebulax_resource_app_table
+    WHERE name LIKE ?
+""", (f"%{keyword}%",)):
+    print(r)
+
+con.close()
+```
+
+运行：
+
+```powershell
+python .\find_app.py
+```
+
+输出形如：
+
+```
+('<appId>', '<小程序名>', '<version>', 'https://mdn.alipayobjects.com/ccdn/uri/file/as/1/<appId>/1/mp/<开发者版本>.<时间戳>')
+```
+
+记下 `package_url`。同一条记录里还有几个有用字段：
+
+| 字段 | 含义 |
+|---|---|
+| `package_url` | 离线包完整包下载地址（本文用的就是它） |
+| `fallback_base_url` | 兜底资源目录（图片等静态资源可从这里直接抓） |
+| `main_url` | 入口页面，如 `/index.html#pages/index/index` |
+| `size` | 解压后大致体积 |
+| `extend_info` | 启动参数、组件声明等 JSON |
+| `plugins` | 依赖的插件列表（每个插件有自己的 appId，同样方式可提取） |
+
+### 步骤 5：下载离线包
+
+直接 GET 下载 `package_url`。建议带上浏览器或支付宝 UA（部分 CDN 可能校验）：
+
+```powershell
+$url = "<package_url>"   # 上一步查到的离线包地址
+
+# PowerShell
+Invoke-WebRequest -Uri $url -OutFile .\pkg.bin `
+  -UserAgent "Mozilla/5.0 (Linux; Android 12) Mobile Safari/537.36 AlipayClient"
+
+# 或 curl
+curl -L -o pkg.bin -A "Mozilla/5.0 (Linux; Android 12) AlipayClient" $url
+```
+
+检查文件头判断格式：
+```powershell
+$bytes = [System.IO.File]::ReadAllBytes(".\pkg.bin")[0..15]
+($bytes | ForEach-Object { $_.ToString("X2") }) -join " "
+# 50 4B 03 04 ... → PK.. 即 ZIP 格式
+```
+
+支付宝离线包的外层是一个 ZIP，内含 4 个文件：
+
+```
+<appId>.tar             ← 小程序源码归档（明文 tar）
+CERT.json              ← 证书
+Manifest.xml           ← 包信息（appId、名称、版本）
+SIGN.json              ← 签名
+```
+
+### 步骤 6：两层解包
+
+**第一层：ZIP → tar**
+
+```powershell
+Copy-Item .\pkg.bin .\pkg.zip
+Expand-Archive -Path .\pkg.zip -DestinationPath .\unzip -Force
+```
+
+可先看一眼 `Manifest.xml` 确认没拿错包：
+```powershell
+Get-Content .\unzip\Manifest.xml
+# <package>
+#   <uid><appId></uid>
+#   <name><小程序名></name>
+#   ...
+# </package>
+```
+
+**第二层：tar → 源码**
+
+Windows 10+ 自带 bsdtar，直接：
+
+```powershell
+mkdir .\source
+tar -xf ".\unzip\<appId>.tar" -C .\source
+```
+
+或用 Python（`untar.py`）：
+
+```python
+import tarfile
+
+with tarfile.open(r".\unzip\<appId>.tar", "r:") as tf:
+    tf.extractall(r".\source")
+```
+
+> tar 中的第一个条目名为 `_fileList`，是支付宝自记录的文件清单，属正常现象。
+
+### 步骤 7：查看产物
+
+解包后即得到小程序的完整编译产物：
+
+```
+source/
+├── appConfig.json        # 页面路由、窗口样式等配置（对应 app.json 编译产物）
+├── index.html            # 入口 HTML
+├── index.js              # 主包 JS（webpack 打包，明文可读）
+├── index.worker.js       # worker 层逻辑（通常最大，业务逻辑大头）
+├── splitchunk~N/index.js # 分包/拆分 chunk（数量不定）
+├── manifest.json         # 应用元信息
+├── meta.json
+└── static/               # 全部图片资源（png/jpg/webp）
+```
+
+验证 `index.js` 开头是 `/*!` 注释 + 标准 webpack bundle 结构，说明是**未加密的明文 JS**——变量名经过压缩，但全部业务逻辑、页面路径、接口调用都完整可读，配合 `appConfig.json` 里的页面列表即可通读整个小程序。
+
+## 四、常见问题
+
+**Q：为什么 `nebulaInstallApps` 目录下找不到业务小程序的包？**
+新版支付宝业务小程序走 xriver 容器，本地只落加密缓存；`nebulaInstallApps` 里能直接看到的 tar 多为基础库/公共资源包（小程序基础库、H5 公共资源等）。业务包走本文的数据库 → CDN 路线。
+
+**Q：没有 root 的模拟器行不行？**
+不行，读取 `/data/data/` 必须要 root。MuMu、雷电等主流模拟器默认提供 root。
+
+**Q：下载 CDN 包必须带 UA 吗？**
+实测带支付宝 UA 一定可行；裸 UA 可能也被允许，建议保留以防 CDN 策略校验。
+
+**Q：想提取小程序依赖的插件怎么办？**
+`nebulax_resource_app_table.plugins` 字段是 JSON 数组，里面有每个插件的 appId；插件的下载地址在 `nebulax_resource_plugin_table` 表的 `packageUrl` / `newPackageUrl` 字段，同样直接下载解包即可。
+
+**Q：拿到的 JS 是压缩混淆过的，能还原成工程结构吗？**
+可以进一步处理：用 prettier/js-beautify 格式化，再按 webpack 模块切分（`<moduleId>:function(e){...}` 这类模块边界），可还原出接近源码的模块化结构，工作量视包大小而定。
+
+## 五、流程总结
+
+```
+模拟器登录支付宝 → 打开目标小程序
+        ↓
+adb + su 拷出 databases/xriver_app.db
+        ↓
+sqlite 查 nebulax_resource_app_table → package_url
+        ↓
+HTTP GET 下载（ZIP）
+        ↓
+解压 ZIP → <appId>.tar（明文）
+        ↓
+解包 tar → index.js / appConfig.json / static/ ... = 小程序源码
+```
+
+全程核心命令不过 5 条：`adb shell su -c cp`、`adb pull`、一条 SQL、一次 HTTP 下载、两次解包。
+
+---
+
+*声明：本文仅用于技术学习与研究，小程序源码版权归原开发者所有，请勿用于抄袭、二次分发或其他侵权用途。*
+
+---
+
+## 使用宝塔从头搭建青龙面板
+
+- **URL**: https://neecoo.dpdns.org/2026-09-qinglong/
+- **Published**: 2026-09-05
+- **Category**: 教程
+- **Tags**: 青龙面板, 经验, 学习
+
+## 安装
+
+使用宝塔面板的docker管理器安装是极其方便的，只需要在 `docker` 页的应用商店直接搜索 `青龙面板` ，然后安装即可。可以更改自己知道含义的配置，否则保持默认即可
+
+![0904-54c15cf3.png](./0904-54c15cf3.png)
+
+安装完成后，根据自己选择的端口号，直接用服务器的 \<ip>:<端口号> 即可访问到青龙面板
+
+成功访问之后，就是初始化的引导界面，根据引导填写 通知（底下有跳过）-> 设置账密 即可
+
+## 使用
+
+### 导入脚本
+
+这是一个自动运行脚本的工具，所以你首先要准备脚本，这里默认你已经有自己的脚本（比如自动签到，或者需要定时执行的小任务）。此时需要将其导入到 `脚本管理` 中
+
+![0904-2ae266a4.png](./0904-2ae266a4.png)
+
+这里是用来存放脚本的源码文件的，通过右上角的“+”号进行添加
+
+添加好的文件，在右上角进行保存，然后是 **调试**，这点很重要，在保存后，右上角有调试按钮，调试是为了保证脚本能够正常的执行，通过调试查看运行结果，没有问题后，代表这一阶段完成
+
+tips：可能遇到没有依赖的问题，跳转到
+
+### 创建定时计划
+
+找到 `定时任务` ，右上角创建任务
+
+![0905-0f4e3bb7.png](./0905-0f4e3bb7.png)
+
+名称随便写，用于辨识
+
+命令/脚本 指的是相对于`脚本管理`里的位置，比如 python test.py 或者 test.py，前者的目的是接受指定参数
+
+定时规则 就是用空格分开时间，比如 每周四早上八点一分两秒 将数字按照 秒 分 时 天 月 周 写成 2 1 8 * * 4
+
+### 至此完成了定时脚本的创建
+
+## 遇到的一些问题
+
+### 如果从在配置容器时，没有勾选`允许外部访问` ,怎么改成可以被外部访问
+
+如果是在宝塔的docker的应用商店下载的青龙面板，就会有一个 `容器编排` 页面，里面可以更改配置。而负责管理访问接口的配置，就藏在 .env 里
+
+![0904-4459d465.png](./0904-4459d465.png)
+
+这个配置是管理对外暴露的host的写法
+- 127.0.0.1 -> 外网无法访问
+- 0.0.0.1 -> 外网可以访问
+当然这是建立在开放了防火墙的基础上
+
+### 调试脚本发现缺少依赖
+
+当调试的时候出现“缺少依赖”的报错，比如：
+
+![0905-c2003ebd.png](./0905-c2003ebd.png)
+
+这就需要安装依赖。退出当前页，左侧找到`依赖管理`，点击右上角`创建依赖`（注意选择自己需要的环境下安装依赖）
+
+![0905-ac44d1ee.png](./0905-ac44d1ee.png)
+
+这里的名称比较容易误导，其实就是`依赖组件名称`
+
+如果安装失败，查看日志详情
+
+![0905-88c7e63c.png](./0905-88c7e63c.png)
+
+最可能的情况是遇到网络问题，这个时候就需要设置镜像源
+
+![0905-6a5d73a5.png](./0905-6a5d73a5.png)
+
+设置正确的源后，就可以重新安装依赖了。
+
+国内可用源：
+- 清华大学镜像源: https://pypi.tuna.tsinghua.edu.cn/simple
+- 阿里云镜像源: https://mirrors.aliyun.com/pypi/simple/
+- 中国科学技术大学镜像源: https://pypi.mirrors.ustc.edu.cn/simple/
+- 腾讯云镜像源: https://mirrors.cloud.tencent.com/pypi/simple/
+- 华为云镜像源: https://repo.huaweicloud.com/repository/pypi/simple/
+
+---
+
+## Shirone从零打通博客自动发布链路：跨仓库构建与部署的踩坑实录
+
+- **URL**: https://neecoo.dpdns.org/2026-09-post/
+- **Published**: 2026-09-04
+- **Category**: 指南
+- **Tags**: 踩坑, 经验, 博客, github action, By AI
+- **Description**: 用可视化写作工具发文 → 内容仓推送 → 主题仓自动构建 → 服务器自动拉取部署，全程无人工干预。
+
+# 从零打通博客自动发布链路：跨仓库构建与部署的踩坑实录
+
+> 目标：用可视化写作工具发文 → 内容仓推送 → 主题仓自动构建 → 服务器自动拉取部署，全程无人工干预。
+> 实际用时：一天。其中真正"通"的时间不到一半，剩下全在填坑。
+> 这篇文章先完整讲清整条链路的搭建步骤（可照抄实践），再复盘我们趟过的每一个坑——有些是上游模板自带的 bug，有些是我的低级失误，有些是冷知识。希望你能少走弯路。
+
+## 一、架构总览
+
+整个系统由四个部分组成：
+```mermaid
+flowchart LR
+    A["admin 写作工具"] -->|"Contents API"| B["blog-content 内容仓"]
+    B -->|"repository_dispatch"| C["Shirone 主题仓"]
+    C -->|"build + 推 deploy 分支"| D["服务器（nginx + git）"]
+```
+
+1. **admin（自研写作工具）**：浏览器表单化写文章/动态，通过 GitHub Contents API 直接提交到内容仓。零构建，Node 单文件起服务。
+2. **内容仓（私有）**：只放 Markdown、图片、配置。push 后由 Actions 做内容校验，再向主题仓发 `repository_dispatch`。
+3. **主题仓（公开）**：收到派发信号后 checkout 内容仓 → 构建静态站 → 把 `dist/` 以孤儿提交强推到 `deploy` 分支 → webhook 通知服务器。
+4. **服务器**：admin 收到 webhook（HMAC 验签）后，在服务器上对稀疏克隆的仓库执行 `git fetch --depth 1 && git reset --hard`，nginx root 指向 `dist/` 不变。
+
+为什么选"deploy 分支"而不是 rsync / artifact 下载？三个理由：
+
+- 服务器端退化成最普通的 `git pull`，不需要 SSH 私钥、不需要 API 调用；
+- **天然带版本历史**，回滚就是 `git reset` 到旧提交，秒级；
+- 每次都是孤儿提交（无历史父节点），分支体积不会累积膨胀。
+
+## 二、完整搭建流程
+
+按顺序做完这五步，链路即通。每一步都给出关键配置，坑的细节留到第三章。
+
+### 第 1 步：准备仓库与令牌
+
+三个仓库各司其职：
+
+| 仓库 | 可见性 | 职责 |
+|---|---|---|
+| 主题仓（Shirone） | 公开 | 主题代码 + 构建流水线 + `deploy` 产物分支 |
+| 内容仓（blog-content） | 私有 | Markdown 文章/动态、图片、站点配置 |
+| admin 工具仓 | 私有 | 写作工具源码，部署在服务器上 |
+
+**令牌**：只需一枚 Fine-grained PAT——Repository access 同时勾选主题仓和内容仓，Permissions 给 `Contents: Read and write`。简单场景不必拆成多枚最小权限 token，但务必设置过期时间。
+
+**随机密钥**：服务器上 `openssl rand -hex 32` 生成一枚，后续两处填同一个值（webhook 验签用）。
+
+### 第 2 步：内容仓——触发工作流
+
+`.github/workflows/trigger-build.yml`（注意 `repository:` 要改成你自己的主题仓）：
+
+```yaml
+name: Trigger Theme Build
+
+on:
+  push:
+    branches: [main]
+    paths:                      # 只有内容真正变化才触发，改 README 不算
+      - "content/**"
+      - "config/**"
+      - "data/**"
+      - "assets/**"
+      - "public/**"
+  workflow_dispatch: {}
+
+concurrency:                    # 高频推送时自动取消旧的，只保留最新一次
+  group: trigger-build
+  cancel-in-progress: true
+
+jobs:
+  validate:                     # 先校验：内容格式错误在源头拦截
+    uses: YOUR_NAME/YOUR_THEME/.github/workflows/content-validate.yml@main
+    with:
+      theme_repository: YOUR_NAME/YOUR_THEME
+
+  dispatch:                     # 校验通过再派发，携带本次 SHA 供主题仓精准取版
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch build event
+        env:
+          HAS_TOKEN: ${{ secrets.DISPATCH_TOKEN != '' }}
+        if: env.HAS_TOKEN == 'true'
+        uses: peter-evans/repository-dispatch@v4
+        with:
+          token: ${{ secrets.DISPATCH_TOKEN }}
+          repository: YOUR_NAME/YOUR_THEME
+          event-type: content-updated
+          client-payload: '{"sha": "${{ github.sha }}"}'
+```
+
+内容仓 Secrets 配置：`DISPATCH_TOKEN` = 你的 PAT。
+
+### 第 3 步：主题仓——构建与推送产物
+
+`.github/workflows/deploy.yml` 骨架（省略缓存等优化，完整版见主题仓）：
+
+```yaml
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  repository_dispatch:          # 响应内容仓的派发
+    types: [content-updated]
+  workflow_dispatch: {}         # 手动触发，回滚/首次部署用
+
+concurrency:
+  group: deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      CONTENT_DIR: .content-src
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout content  # 按派发携带的 SHA 精准拉取内容仓
+        uses: actions/checkout@v4
+        with:
+          repository: YOUR_NAME/YOUR_CONTENT_REPO
+          ref: ${{ github.event.client_payload.sha }}
+          path: .content-src
+          token: ${{ secrets.CONTENT_REPO_TOKEN }}
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm content:sync  # 内容物化 + 配置覆盖
+      - run: pnpm build         # 静态构建，产物在 dist/
+
+      - name: Push dist to deploy branch   # 孤儿提交强推，分支只含 dist/
+        env:
+          DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+        run: |
+          git init -q deploy-repo
+          mv dist deploy-repo/dist
+          cd deploy-repo
+          git checkout -q -b deploy
+          git config user.name "deploy-bot"
+          git config user.email "deploy-bot@users.noreply.github.com"
+          git add -A
+          git commit -qm "deploy: content ${{ github.sha }}"
+          git push -q --force \
+            "https://x-access-token:${DEPLOY_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            deploy:deploy
+
+      - name: Notify server and wait for deployment    # 通知 + 轮询
+        env:
+          HOOK_URL: ${{ secrets.DEPLOY_HOOK_URL }}
+          HOOK_SECRET: ${{ secrets.DEPLOY_HOOK_SECRET }}
+        run: |
+          payload='{"repository":"'$GITHUB_REPOSITORY'","sha":"'$CONTENT_SHA'"}'
+          signature=$(printf '%s' "$payload" \
+            | openssl dgst -sha256 -hmac "$HOOK_SECRET" -hex | sed 's/^.* //')
+          body=$(curl --fail-with-body -sS --request POST "$HOOK_URL" \
+            --header "X-Signature: sha256=$signature" --data "$payload")
+          ticket=$(printf '%s' "$body" | sed -n 's/.*"ticket":"\([^"]*\)".*/\1/p')
+          # 每 10 秒轮询一次 ticket 状态，直到 done / failed / 超时
+          # （完整轮询循环见主题仓 deploy.yml）
+```
+
+主题仓 Secrets 一览：
+
+| Secret | 值 |
+|---|---|
+| `CONTENT_REPO_TOKEN` | PAT（拉内容仓） |
+| `DEPLOY_TOKEN` | PAT（推 deploy 分支） |
+| `DEPLOY_HOOK_URL` | `https://admin.你的域名/api/deploy/hook` |
+| `DEPLOY_HOOK_SECRET` | 第 1 步生成的随机串 |
+
+### 第 4 步：服务器——稀疏克隆与 admin 部署
+
+**一次性初始化**——稀疏克隆产物仓库（磁盘上只会有 `dist/`，没有源码和历史）：
+
+```bash
+git clone --filter=blob:none --no-checkout --single-branch \
+     --branch deploy https://github.com/YOUR_NAME/YOUR_THEME.git /www/wwwroot/blog
+cd /www/wwwroot/blog
+git sparse-checkout set dist
+```
+
+**部署 admin**（Node 20+，以宝塔 Node 项目为例）：
+
+```bash
+git clone https://github.com/YOUR_NAME/YOUR_ADMIN.git /www/wwwroot/blog-admin
+cd /www/wwwroot/blog-admin && npm install --omit=dev
+cp .env.example .env
+```
+
+`.env` 关键项：
+
+```ini
+ADMIN_PASSWORD=<登录密码>
+GITHUB_TOKEN=<PAT>          # 推文章用
+GITHUB_OWNER=<你的用户名>
+GITHUB_REPO=<内容仓名>
+DEPLOY_SECRET=<第 1 步的随机串>   # 与 DEPLOY_HOOK_SECRET 相同
+DEPLOY_DIR=/www/wwwroot/blog
+DEPLOY_BRANCH=deploy
+```
+
+admin 收到 webhook 后的核心逻辑只有两行 git：
+
+```js
+git(dir, ["fetch", "origin", branch, "--depth=1"]);
+git(dir, ["reset", "--hard", "FETCH_HEAD"]);
+```
+
+配合 `sparse-checkout`，这两行就是"部署"的全部。
+
+**nginx**：博客站点 `root /www/wwwroot/blog/dist;`；admin 站点反代 `127.0.0.1:3777` 并带上 `X-Forwarded-Proto` 头。
+
+### 第 5 步：端到端验证
+
+admin 发一条动态 → 内容仓 Actions 校验+派发全绿 → 主题仓 Actions 构建全绿 → 日志末尾出现"服务器拉取部署完成" → 刷新博客看到内容上线。全链路 3~4 分钟。
+
+## 三、坑点集锦
+
+链路能跑通只是及格线。以下 10 个坑，每一个都真实地消耗了我们排障时间——建议搭建前通读一遍，尤其是 3、4、5 这三个"静默失败"。
+
+### 坑 1：`secrets` 不能用在 step 级 `if` 里
+
+**现象**：内容仓 workflow 直接报错无法运行：
+
+```
+Invalid workflow file
+(Line: 41, Col: 13): Unrecognized named-value: 'secrets'.
+Located at position 1 within expression: secrets.DISPATCH_TOKEN != ''
+```
+
+**原因**：GitHub Actions 的 `secrets` 上下文在 **job 级 `if`** 里可用，但在 **step 级 `if`** 里不可用。这是官方文档里写得很隐蔽的限制。上游主题模板自带的 `trigger-build.yml.example` 就踩了这个雷——而模板作者大概率从没实际启用过这个文件（它以 `.example` 后缀存在，启用前不会被 Actions 解析）。
+
+**解法**：经典的 env 中转：
+
+```yaml
+- name: Dispatch build event
+  env:
+    HAS_TOKEN: ${{ secrets.DISPATCH_TOKEN != '' }}   # env 赋值处可以用 secrets
+  if: env.HAS_TOKEN == 'true'                        # if 里只引用 env
+```
+
+### 坑 2：私有仓的 token 权限问题表现为 404 而不是 403
+
+**现象**：admin 打开就弹 `GitHub API 404 : Not Found`。
+
+**原因**：GitHub 对私有仓库的设计是——**token 看不到这个仓库时返回 404**，而不是 403，为了避免泄露仓库的存在性。当时手头有好几枚 PAT（主题仓一枚、内容仓一枚），`.env` 里贴错了仓库的 token，于是"仓库存在但无权访问"被表现成了"仓库不存在"。
+
+**教训**：多枚 PAT 并存时，先写好"哪枚 token 管哪个仓"的对照表再动手。Fine-grained PAT 的 Repository access 是显式勾选的，勾了 A 仓就绝对访问不了 B 仓。诊断时直接：
+```bash
+curl -s -w "%{http_code}" -H "Authorization: Bearer $TOKEN" \
+  https://api.github.com/repos/OWNER/REPO
+```
+
+404 = token 不认这个仓，401 = token 本身无效，200 = 通了。
+
+### 坑 3：GitHub Trees API 与本地文件树的类型不一致
+
+**现象**：admin 登录正常、API 全部 200、不报任何错，但文章/动态列表**恒为空**。
+
+**原因**：存储层有两个实现——DEV 模式读本地磁盘，生产模式调 GitHub API。GitHub Trees API 返回的文件类型是 `"blob"`、目录是 `"tree"`；而本地实现返回 `"file"` / `"dir"`。消费端写的是 `if (item.type !== "file") continue;`——DEV 模式一切正常，一上生产，每个文件都被静默过滤，返回空数组。
+
+```js
+// 修复：在生产实现的出口做类型归一化
+const TYPE_MAP = { blob: "file", tree: "dir" };
+return items.map((i) => ({ path: i.path, type: TYPE_MAP[i.type] || i.type }));
+```
+
+**教训**：同一个接口有多个后端实现时，**类型契约必须在出口处归一化**，否则 DEV 测不出来、生产必炸。这类"安静的 bug"比报错的可怕得多——API 200 让你完全怀疑不到代码层。
+
+### 坑 4：YAML 引号时间戳过不了 Astro 的 z.date() 校验
+
+**现象**：内容仓校验 job 失败：
+
+```
+[InvalidContentEntryDataError] moments → 2026-09-04-post
+data does not match collection schema
+```
+
+**原因**：一条链式的类型丢失——
+
+1. admin 生成 frontmatter 时为了防特殊字符歧义，全局设了 `defaultStringType: "QUOTE_DOUBLE"`，所有字符串值都带双引号输出；
+2. 主题的 content schema 要求 `published: z.date()`；
+3. Astro 内容层用 gray-matter 解析 frontmatter，其 YAML 解析遵循 **YAML 1.1 语义**：**无引号**的 `2026-09-04 05:50:13` 才会被识别为 timestamp 解析成 `Date`；**带引号就恒为 string**，直接被 `z.date()` 拒掉。
+
+```yaml
+published: "2026-09-04 05:50:13"   # ✗ 解析为 string，校验失败
+published: 2026-09-04 05:50:13     # ✓ 解析为 Date，校验通过
+```
+
+**修复**：序列化后做行级后处理，只对命中日期时间格式的值剥引号：
+```js
+raw.split("\n").map((line) =>
+  line.replace(
+    /^(\s*)([\w-]+): "(\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?)?)"$/,
+    "$1$2: $3",
+  ),
+).join("\n");
+```
+
+期间还尝试过 yaml 库的 `Scalar + format: "PLAIN"`、`new Scalar(v, { tag })` 等方案，全部无效——`QUOTE_DOUBLE` 默认的优先级压过了这些设置。正则后处理虽然"不优雅"，但它**确定性地工作**。
+
+### 坑 5：Express 路由级 raw-body 捕获静默失效
+
+**现象**：Actions 通知服务器时，admin 返回 500。
+
+**原因**：部署 webhook 需要 HMAC 验签，签名要算在**原始请求字节**上，所以需要捕获 rawBody。当时的写法：
+
+```js
+// server.js
+app.use(express.json({ limit: "2mb" }));       // 全局解析
+
+// routes/api.js
+const deployRawBody = express.json({           // 路由级再来一次，带 verify
+  verify: (req, _res, buf) => { req.rawBody = buf; },
+});
+router.post("/deploy/hook", deployRawBody, ...);
+```
+
+问题在于 body-parser 内部机制：全局 `express.json()` 解析后会在 req 上标记 `req._body = true`，路由级的解析器看到这个标记会**直接跳过**——连 `verify` 回调都不执行。于是 `req.rawBody` 是 `undefined`，`crypto.createHmac().update(undefined)` 抛 TypeError → 500。
+
+更阴险的是，本地测试时用浏览器裸 POST（不带签名头），代码在"签名头不存在的"分支就返回 401 了，根本走不到 update 那一行——**测试路径完美掩盖了 bug**。直到 Actions 带着正确签名头打过来才引爆。
+
+**解法**：rawBody 捕获挪到全局解析器的 `verify` 里，一处捕获处处可用：
+
+```js
+app.use(express.json({
+  limit: "2mb",
+  verify: (req, _res, buf) => { req.rawBody = buf; },
+}));
+```
+
+### 坑 6：CSS `display` 声明会顶掉 HTML `hidden` 属性
+
+**现象**：明明是生产模式，界面却显示"DEV 下载模式"徽标。
+
+**原因**：JS 逻辑完全正确（服务端返回 `devMode: false`，前端也确实没移除 `hidden` 属性，DOM 检查 `el.hidden === true`），但 CSS 里 `.badge { display: inline-flex }` 的优先级**高于**浏览器对 `[hidden]` 属性默认的 `display: none`。于是元素"逻辑上隐藏、样式上可见"。
+
+**解法**：一条全局规则，让 `hidden` 永远赢：
+
+```css
+[hidden] { display: none !important; }
+```
+
+**教训**：HTML 的 `hidden` 属性只是"未样式化的默认"，任何显式 `display` 都会覆盖它。只要页面里有元素类设了 display，就该配这条防御性规则。
+
+### 坑 7：创建孤儿分支的正确姿势（以及我搞砸的两次）
+
+需求：把本地 `dist/` 推成一个只含产物的 `deploy` 孤儿分支。听起来简单，实际连翻两次车：
+
+**翻车一**：`git switch --orphan deploy` 被工作区未提交改动拦截（安全机制，正常），改用 plumbing 命令（`update-index` + `write-tree` + `commit-tree`）时，在错误的 index 状态下 `write-tree` 把 **main 的完整目录树**写了进去，推上去一个 56MB 的"孤儿"分支——它确实无 parent，但内容是整个项目。
+
+**翻车二**：用临时 worktree 方案重做，命令本身对了，但**终端当时 cd 在另一个仓库里**，整串操作（worktree、提交、push）全部落在了错误的仓库上；而随后的验证命令也在同一个错误仓库里执行，看到了那个仓库的 `origin/deploy`，得出"成功"的假象。直到用 `rev-list --count`（提交数）、`cat-file -p`（查 parent 行）这类**不可伪造的指标**重新硬核验证，才发现远端根本没变。
+
+**正确姿势**（Windows PowerShell，全程显式路径，绝不依赖 cwd）：
+
+```powershell
+$tmp = "$env:TEMP\deploy-$PID"
+New-Item -ItemType Directory "$tmp\dist" -Force
+Copy-Item "D:\project\Shirone\dist\*" "$tmp\dist\" -Recurse
+git -C $tmp init -q -b deploy
+git -C $tmp add -A
+git -C $tmp commit -qm "deploy: ..."
+git -C $tmp push --force https://github.com/OWNER/REPO.git deploy:deploy
+Remove-Item -Recurse -Force $tmp
+```
+
+**教训**：① shell 里连续操作多个仓库时，每条 git 命令都带 `-C <绝对路径>`；② 验证结果要用结构性指标（提交数、树内容、parent 行），不要只看命令退出码，**尤其是在错误的目录里连验证都是错的**。
+
+### 坑 8：`safe.directory` 只认属主 UID，不看组
+
+**现象**：服务器上操作 git 仓库连环报 `fatal: detected dubious ownership`。明明做过 `chown -R www-data:neeco`，为什么 neeco 还是"疑权"？
+
+**原因**：git 的 safe.directory 机制**只信任仓库属主的 UID**，组权限再开也不行。而这条链路上天然存在三个 git 用户：`neeco`（SSH 登录）、`www-data`/`www`（服务进程）、`root`（sudo 操作），谁克隆的仓库对另外两家都是"dubious"。
+
+**解法**（组合拳）：
+
+```bash
+# 1. 仓库统一归属给服务进程用户（它要写 .git，最重要）
+sudo chown -R www:www /www/wwwroot/blog
+
+# 2. 人类用户加个人例外（写进自己的 ~/.gitconfig）
+git config --global --add safe.directory /www/wwwroot/blog
+
+# 3. root 也加一份（sudo 操作时生效）
+sudo git config --global --add safe.directory /www/wwwroot/blog
+
+# 4. 应用进程里执行 git 时，直接带参数，不依赖任何 global config
+execFileSync("git", ["-c", `safe.directory=${dir}`, "-C", dir, ...args])
+```
+
+### 坑 9：宝塔的 `www` ≠ Ubuntu 的 `www-data`
+
+**现象**：权限明明 `chown -R www-data:www-data` 了，部署时还是 `cannot open '.git/FETCH_HEAD': Permission denied`。
+
+**原因**：`ps aux` 一查，admin 进程的用户是 **`www`**——宝塔面板自建的用户，和 Ubuntu 系统自带的 `www-data` **是两个不同的用户**。宝塔的 Node 项目管理器和它的 nginx 都用 `www` 跑，而我在 systemd 时代的习惯（`User=www-data`）先入为主了。
+
+**教训**：环境迁移（systemd → 宝塔）时，**一切以 `ps aux` 的实际输出为准**，不要凭上一个环境的经验。一行命令的事：
+
+```bash
+ps aux | grep node | grep -v grep
+```
+
+### 坑 10：www-data 没有 HOME，`git config --global` 会炸
+
+给服务用户加 safe.directory 例外时：
+
+```
+error: could not lock config file /var/www/.gitconfig: No such file or directory
+```
+
+`--global` 写的是 `$HOME/.gitconfig`，而 `www-data`/`www` 这类非登录用户的 HOME 目录根本不存在。先 `mkdir -p` 再执行；或者干脆走坑 8 的第 4 招——应用侧 `-c` 参数内联，绕开 global config 依赖。
+
+## 四、一些设计决策的回望
+
+**为什么 webhook 要带 HMAC 而不是简单密码**：hook 端点暴露在公网（Actions 要能调到它），一个静态密码会在每个请求里明文传输。HMAC-SHA256 对 payload 签名，密钥不出现在请求中，且防篡改。实现上有个细节：轮询用的 GET 没有请求体，签名约定对**空串**计算——两端必须一致，否则永远 401。
+
+**为什么 Actions 要轮询等部署完成**：如果通知完就走，workflow 绿了但服务器可能拉取失败，链路断了都不知道。轮询 ticket 到 `done`/`failed` 才结束，把"服务器真的部署成功了吗"纳入 CI 的成败判定里。代价是 Actions 要多跑一两分钟，但换来了**端到端的可观测性**——这次排障中，"轮询返回的错误详情"（FETCH_HEAD Permission denied）直接把问题钉死，不用登服务器翻日志。
+
+**为什么服务器拉取用 `--depth=1` + `reset --hard`**：部署只关心最新状态，浅拉取省带宽；`reset --hard FETCH_HEAD` 天然幂等，重复触发无副作用。配合稀疏克隆（`--filter=blob:none` + `sparse-checkout set dist`），服务器磁盘上只有产物，没有源码和历史包袱。
+
+**回滚的意外收获**：deploy 分支每次部署一个孤儿提交，天然形成版本序列。回滚 = 服务器上 `git fetch --depth=50 && git reset --hard <旧提交>`，秒级完成，这是当初选分支方案时没充分预料到的红利。
+
+## 五、最终链路与验证
+
+全自动流水线的完整形态：
+
+| 步骤 | 触发方式 | 耗时 |
+|---|---|---|
+| admin 写作 → 推内容仓 | 表单保存（Contents API） | 秒级 |
+| 内容仓校验 + 派发 | push 自动 | ~1 分钟 |
+| 主题仓构建 + 推 deploy 分支 | repository_dispatch 自动 | ~2 分钟 |
+| 服务器拉取 + 上线 | webhook 自动 | 秒级 |
+| Actions 确认部署结果 | 轮询 ticket | 含在上一步 |
+
+端到端验证方法：admin 发一条动态 → 盯着 Actions 全绿 → 刷新博客看到内容上线。全链路 3~4 分钟，人类只负责写字。
+
+## 六、写在最后
+
+复盘这一天，坑的分布很有意思：
+
+- **上游模板的坑**（2 个）：`secrets` 限制、部署路径不一致——模板功能看似齐全，实际是"没被实战跑通"的代码；
+- **自研代码的坑**（4 个）：类型契约、YAML 时间戳、rawBody 捕获、CSS hidden——每一个都是"本地测试好好的"的静默故障；
+- **环境与权限的坑**（4 个）：safe.directory、用户名错位、HOME 缺失、目录属主——跨服务器部署永远的经典节目。
+
+如果只能留三条经验：
+
+1. **静默失败比报错可怕**——API 返回 200 不代表数据正确，测试路径覆盖不到的分支，生产环境会替你覆盖；
+2. **验证要用不可伪造的指标**——退出码会说谎（尤其在错误的目录里），但提交数、类型、结构不会；
+3. **权限问题先 `ps aux` 再 `ls -l`**——先确认"进程到底是谁"，再看"文件到底归谁"，顺序反了就是无休止的瞎猜。
