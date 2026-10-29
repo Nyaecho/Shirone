@@ -160,15 +160,23 @@ jobs:
       - name: Notify server and wait for deployment
         env:
           HOOK_URL: ${{ secrets.DEPLOY_HOOK_URL }}
+          # 可选：HOOK_URL 为裸 IP（绕过 CDN/WAF 直连源站）时，用于覆盖 Host 头以命中正确的 vhost
+          HOOK_HOST: ${{ secrets.DEPLOY_HOOK_HOST }}
           HOOK_SECRET: ${{ secrets.DEPLOY_HOOK_SECRET }}
           REPO: ${{ github.repository }}
           CONTENT_SHA: ${{ steps.content.outputs.sha }}
         run: |
           set -euo pipefail
+          # HOOK_URL 是 IP 直连时附加 Host 头（nginx 按域名选 vhost；未配置则不加）
+          host_args=()
+          if [ -n "${HOOK_HOST:-}" ]; then
+            host_args=(--header "Host: $HOOK_HOST")
+          fi
           payload="{\"repository\":\"$REPO\",\"sha\":\"$CONTENT_SHA\"}"
           signature=$(printf '%s' "$payload" | openssl dgst -sha256 -hmac "$HOOK_SECRET" -hex | sed 's/^.* //')
           body=$(curl --fail-with-body --silent --show-error --retry 3 --retry-delay 2 \
             --max-time 30 --request POST "$HOOK_URL" \
+            "${host_args[@]}" \
             --header "Content-Type: application/json" \
             --header "X-Signature: sha256=$signature" \
             --data "$payload")
@@ -185,6 +193,7 @@ jobs:
           while :; do
             sleep 10
             status_body=$(curl --fail-with-body --silent --show-error --max-time 30 \
+              "${host_args[@]}" \
               --header "X-Signature: sha256=$poll_sig" \
               "$HOOK_URL?ticket=$ticket") || { echo "轮询请求失败，重试…"; continue; }
             state=$(printf '%s' "$status_body" | sed -n 's/.*"state":"\([^"]*\)".*/\1/p')
