@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+	<meta charset="UTF-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<title>桌宠游乐场</title>
+	<meta name="description" content="博客桌宠游乐场：小鲸娘在屏幕上溜达、打盹、发呆，点她会 Q 弹，拖起来甩出去还会弹地。" />
+	<link rel="stylesheet" href="/pet/pet-page.css" />
+	<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐋</text></svg>" />
+</head>
+<body>
+	<div class="pet-shell">
+		<a class="pet-back" href="/">‹ 返回博客</a>
+		<h1 class="pet-title">桌宠游乐场</h1>
+		<p class="pet-sub">小鲸娘在这里陪你摸鱼</p>
+
+		<main class="pet-main">
+			<p class="pet-hint">
+				点她会 Q 弹；拖起来甩出去会弹地；她也会自己溜达、打盹、发呆。
+				下面的按钮可以点播动作。
+			</p>
+
+			<div class="pet-unsupported" id="pet-unsupported">
+				当前浏览器暂不支持 VP9 透明通道视频（如 Safari），桌宠无法显示。
+				推荐使用 Chrome / Edge / Firefox 访问。
+			</div>
+
+			<div id="pet-picker"></div>
+
+			<p class="pet-credit">
+				动画素材来自开源项目 dsh-pet
+				<a href="https://github.com/PC2005-cloud/dsh-pet" target="_blank" rel="noopener noreferrer">GitHub</a>
+				（作者 PC2005-cloud），按其「非商用展示」条款使用；浏览器交互实现参考
+				<a href="https://ai-meme.cdqyfdbymn.me/games/pet" target="_blank" rel="noopener noreferrer">原演示页</a>。
+			</p>
+		</main>
+	</div>
+
+	<script type="module">
+		import { ACTIONS, DeskPet, probeAlphaSupport } from "/pet/deskpet.js";
+		import { ACT_QUOTES, ACT_DEFAULT, POKE_QUOTES, pickQuote } from "/pet/pet-quotes.js";
+
+		/* 精选全集（与 pet-lab/fetch-assets.mjs 的清单一致） */
+		const FULL_ALLOW = [
+			"idle", "drag", "squash",
+			"sleep", "wakeUp", "lookAround", "yawn", "stretch", "startled",
+			"muse", "museThink",
+			"run", "crabWalk", "floatStep",
+			"clickWave", "clickJoy", "clickAngry", "clickShy", "clickGiggle",
+			"eatToken", "hotpot", "iceCream", "snack",
+			"fireworks", "redEnvelope", "buildSnowman",
+			"cardMagic", "juggleBalls",
+			"dance",
+			"coding", "petCat",
+			"whaleAppear", "whaleBubbles",
+		];
+
+		/* 点播分组：展示顺序即数组顺序 */
+		const GROUPS = [
+			{ label: "碎碎念", ids: ["muse", "museThink"] },
+			{ label: "吃货", ids: ["eatToken", "hotpot", "iceCream", "snack"] },
+			{ label: "节日", ids: ["fireworks", "redEnvelope", "buildSnowman"] },
+			{ label: "表演", ids: ["cardMagic", "juggleBalls"] },
+			{ label: "歌舞", ids: ["dance"] },
+			{ label: "特效", ids: ["whaleAppear", "whaleBubbles"] },
+			{ label: "日常", ids: ["lookAround", "yawn", "stretch", "startled", "coding", "petCat"] },
+			{ label: "起居", ids: ["sleep", "wakeUp"] },
+			{ label: "步法", ids: ["run", "crabWalk", "floatStep"] },
+		];
+
+		const LABELS = {
+			sleep: "睡觉", wakeUp: "睡醒", lookAround: "东张西望", yawn: "打哈欠",
+			stretch: "伸懒腰", startled: "吓一跳",
+			muse: "发呆", museThink: "苦思",
+			run: "跑步", crabWalk: "横着走", floatStep: "漂浮步",
+			eatToken: "吃 token", hotpot: "涮火锅", iceCream: "吃冰激凌", snack: "偷吃零食",
+			fireworks: "放烟花", redEnvelope: "红包", buildSnowman: "堆雪人",
+			cardMagic: "纸牌魔术", juggleBalls: "抛球杂耍",
+			dance: "跳舞",
+			coding: "敲代码", petCat: "撸猫",
+			whaleAppear: "鲸鱼登场", whaleBubbles: "吐泡泡",
+		};
+
+		const picker = document.getElementById("pet-picker");
+
+		function playAction(pet, id) {
+			const action = ACTIONS[id];
+			if (!action) return;
+			if (action.kind === "move") pet.startMove(id); // 步法要走位驱动，直接 play 会原地循环
+			else {
+				pet.setState("acting"); // 抢占漫游中的 rAF 插值，否则点播会被漫游收尾覆盖
+				pet.play(id);
+			}
+		}
+
+		function buildPicker(pet) {
+			for (const group of GROUPS) {
+				const label = document.createElement("p");
+				label.className = "pet-picker-label";
+				label.textContent = group.label;
+				picker.appendChild(label);
+
+				const chips = document.createElement("div");
+				chips.className = "pet-chips";
+				for (const id of group.ids) {
+					const chip = document.createElement("button");
+					chip.type = "button";
+					chip.className = "pet-chip";
+					chip.textContent = LABELS[id] || id;
+					chip.addEventListener("click", () => playAction(pet, id));
+					chips.appendChild(chip);
+				}
+				const random = document.createElement("button");
+				random.type = "button";
+				random.className = "pet-chip cat";
+				random.textContent = "随机";
+				random.addEventListener("click", () => {
+					const pool = group.ids.filter((id) => ACTIONS[id].kind !== "move");
+					playAction(pet, pool[Math.floor(Math.random() * pool.length)] || group.ids[0]);
+				});
+				chips.appendChild(random);
+				picker.appendChild(chips);
+			}
+		}
+
+		if (await probeAlphaSupport()) {
+			const pet = new DeskPet({
+				allow: FULL_ALLOW,
+				roam: !window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+				posKey: "shirone-pet-pos",
+				defaultFx: 0.15, // 左下角站定
+				ariaLabel: "桌宠小鲸娘：点击互动，可以拖拽",
+			});
+			pet.onActBubble = (action) => pet.bubble(pickQuote(ACT_QUOTES[action] || ACT_DEFAULT));
+			pet.onPokeBubble = () => pet.bubble(pickQuote(POKE_QUOTES));
+			pet.start();
+			buildPicker(pet);
+		} else {
+			document.getElementById("pet-unsupported").classList.add("show");
+		}
+	</script>
+</body>
+</html>
